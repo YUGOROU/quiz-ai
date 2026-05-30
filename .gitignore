@@ -1,0 +1,25 @@
+# 個人情報（コミットしない）
+docs/MEMORY.md
+
+# コーパスデータ・キャッシュ・レポート（ライセンス: 問題文の再配布禁止）
+corpus/
+**/corpus/
+*_cache.jsonl
+annotated_questions.jsonl
+annotation_cache.jsonl
+phase0*_report.json
+*.jsonl
+
+# 認証情報
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / エディタ
+.DS_Store
+.claude/settings.local.json
