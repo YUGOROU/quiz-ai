@@ -32,9 +32,13 @@ from tqdm import tqdm
 import qutils as U
 
 # アノテーション・パラメータ（corpus.md準拠）
-K = 5                 # 1ポジションあたりの試行数
+K = 5                 # 1ポジションあたりの試行数（--k で上書き）
 THRESHOLD = 0.8       # k回中 r回以上 正答（5回中4回）
 TEMPERATURE = 0.7     # 試行をばらけさせ正答率を測るため > 0
+# Step1はreasoning不要（答え1語のみ）。隠れ思考の課金を止めるため none を既定に。
+REASONING_EFFORT = "none"
+# Crof.ai deepseek-v4-flash 価格 $/1M（usageサマリのコスト概算用）
+PRICE = (0.12, 0.21)
 # フィルタ条件
 MIN_QLEN = 50         # 問題文長 >= 50
 MIN_ALEN = 2          # 正解の文字数 >= 2
@@ -42,7 +46,8 @@ MIN_ALEN = 2          # 正解の文字数 >= 2
 BUZZ_RATIO_RANGE = (0.20, 0.85)
 
 
-def eval_position(client, model, question: str, n: int, golds, k: int = K) -> float:
+def eval_position(client, model, question: str, n: int, golds, k: int = K,
+                  reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> float:
     """question[:n] を与えて k 回試行し、正答率（0..1）を返す。"""
     prefix = question[:n]
     prompt = (
@@ -52,7 +57,8 @@ def eval_position(client, model, question: str, n: int, golds, k: int = K) -> fl
     )
     correct = 0
     for _ in range(k):
-        out = U.chat(client, model, prompt, max_tokens=32, temperature=TEMPERATURE)
+        out = U.chat(client, model, prompt, max_tokens=32, temperature=TEMPERATURE,
+                     reasoning_effort=reasoning_effort, meter=meter)
         if not out or "不明" in out:
             continue
         if U.is_correct(out, golds):
@@ -75,7 +81,8 @@ def passes_prefilter(q: dict) -> bool:
     return True
 
 
-def annotate_question(client, model, q: dict) -> dict:
+def annotate_question(client, model, q: dict, k: int = K,
+                      reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> dict:
     """1問をアノテートして結果dictを返す（失敗時 is_valid=False）。"""
     qid = q["qid"]
     question = q["question"]
@@ -83,10 +90,14 @@ def annotate_question(client, model, q: dict) -> dict:
     L = len(question)
     min_pos = max(10, int(L * 0.15))
 
+    def ev(n: int) -> float:
+        return eval_position(client, model, question, n, golds, k=k,
+                             reasoning_effort=reasoning_effort, meter=meter)
+
     curve: dict[int, float] = {}
 
     # 全文で答えられるか（is_valid 判定）
-    full_ratio = eval_position(client, model, question, L, golds)
+    full_ratio = ev(L)
     curve[L] = round(full_ratio, 3)
     if full_ratio < THRESHOLD:
         return {
@@ -103,7 +114,7 @@ def annotate_question(client, model, q: dict) -> dict:
         mid = (lo + hi) // 2
         ratio = curve.get(mid)
         if ratio is None:
-            ratio = eval_position(client, model, question, mid, golds)
+            ratio = ev(mid)
             curve[mid] = round(ratio, 3)
         if ratio >= THRESHOLD:
             buzz_char = mid
@@ -144,14 +155,23 @@ def main() -> None:
     ap.add_argument("--max-workers", type=int, default=32,
                     help="並列度。10→30→50 と上げて頭打ち点（Crof.ai同時接続上限）を探る")
     ap.add_argument("--limit", type=int, default=0, help="先頭N問のみ（0=全件）。パイロット用")
+    ap.add_argument("--k", type=int, default=K,
+                    help="1ポジションあたりの試行数。時間/コストが厳しければ 5→3")
+    ap.add_argument("--reasoning-effort", default=REASONING_EFFORT,
+                    help="思考量。Step1は答え1語のみ必要なので none 既定（課金停止）。"
+                         "'off'/'none'/空で無効化扱い")
     args = ap.parse_args()
+    reasoning_effort = args.reasoning_effort
+    if reasoning_effort in ("", "off"):
+        reasoning_effort = None
 
     cache_path = os.path.join(args.out_dir, "annotation_cache.jsonl")
     out_path = os.path.join(args.out_dir, "annotated_questions.jsonl")
     os.makedirs(args.out_dir, exist_ok=True)
 
     client, model = U.get_client()
-    print(f"[model] {model}")
+    meter = U.UsageMeter()
+    print(f"[model] {model}  (k={args.k}, reasoning_effort={reasoning_effort!r})")
 
     raw = U.ensure_raw("aio_02_train.jsonl", os.path.join(args.out_dir, "raw"))
     questions = [q for q in U.read_jsonl(raw) if passes_prefilter(q)]
@@ -165,7 +185,8 @@ def main() -> None:
     writer = U.JsonlWriter(cache_path)
     try:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-            futs = {ex.submit(annotate_question, client, model, q): q for q in todo}
+            futs = {ex.submit(annotate_question, client, model, q,
+                              args.k, reasoning_effort, meter): q for q in todo}
             for fut in tqdm(as_completed(futs), total=len(futs), desc="annotate"):
                 try:
                     writer.write(fut.result())
@@ -176,6 +197,13 @@ def main() -> None:
                                   "error": str(e)})
     finally:
         writer.close()
+
+    # 本番投入前に reasoning が課金されていないか必ず確認する（パイロットの6倍超過の主因）
+    price = PRICE if model == "deepseek-v4-flash" else None
+    print(f"[usage] {meter.summary(price)}")
+    if meter.reasoning > 0:
+        print("[usage][警告] reasoning_tokens>0：思考が課金されている。"
+              "--reasoning-effort none が効いているか確認すること。")
 
     finalize(cache_path, out_path)
 

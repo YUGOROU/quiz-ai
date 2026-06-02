@@ -48,12 +48,64 @@ def get_client():
     )
 
 
+class UsageMeter:
+    """スレッドセーフな usage 集計（prompt/completion/reasoning トークン・コール数）。
+
+    Step1 の本番投入前に reasoning が課金されていないか実測するために使う。
+    """
+
+    def __init__(self) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self.calls = 0
+        self.prompt = 0
+        self.completion = 0
+        self.reasoning = 0
+
+    def add(self, usage) -> None:
+        if usage is None:
+            return
+        pt = getattr(usage, "prompt_tokens", 0) or 0
+        ct = getattr(usage, "completion_tokens", 0) or 0
+        rt = 0
+        details = getattr(usage, "completion_tokens_details", None)
+        if details is not None:
+            if isinstance(details, dict):
+                rt = details.get("reasoning_tokens", 0) or 0
+            else:
+                rt = getattr(details, "reasoning_tokens", 0) or 0
+        with self._lock:
+            self.calls += 1
+            self.prompt += pt
+            self.completion += ct
+            self.reasoning += rt
+
+    def summary(self, price: tuple[float, float] | None = None) -> str:
+        """price=(in,out) $/1M を渡すと概算コストも返す。"""
+        msg = (f"calls={self.calls:,} prompt={self.prompt:,} "
+               f"completion={self.completion:,}（内reasoning={self.reasoning:,}）")
+        if price and self.calls:
+            cost = (self.prompt * price[0] + self.completion * price[1]) / 1e6
+            msg += f" / 実コスト≈${cost:.4f}（${cost / self.calls * 1000:.3f}/1kコール）"
+        return msg
+
+
 def chat(client, model, prompt: str, *, max_tokens: int = 64,
-         temperature: float = 0.0, retries: int = 6) -> str | None:
+         temperature: float = 0.0, retries: int = 6,
+         reasoning_effort: str | None = None,
+         meter: "UsageMeter | None" = None) -> str | None:
     """1ターンのchat補完。429/一時エラーは exponential backoff で再試行。
+
+    reasoning_effort: "none"/"low"/... を指定すると extra_body で思考量を制御する。
+        Step1（アノテ）は答え1語しか要らないので "none" で隠れ思考の課金を止める。
+        SDK の enum 検証を避けるため named ではなく extra_body で body に直接載せる。
+    meter: 渡すと usage を集計する（本番前のコスト実測用）。
 
     全試行失敗時は None を返す（呼び出し側でスキップ扱い）。
     """
+    extra_body: dict = {}
+    if reasoning_effort:
+        extra_body["reasoning_effort"] = reasoning_effort
     delay = 1.0
     for attempt in range(retries):
         try:
@@ -62,7 +114,10 @@ def chat(client, model, prompt: str, *, max_tokens: int = 64,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
                 temperature=temperature,
+                extra_body=extra_body or None,
             )
+            if meter is not None:
+                meter.add(getattr(resp, "usage", None))
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:  # noqa: BLE001 — provider横断で広く捕捉
             if attempt == retries - 1:
