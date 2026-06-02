@@ -164,6 +164,10 @@ def main() -> None:
     print(f"  脱落 is_valid=False     : {len(invalid)}  （内 APIエラー {len(errored)}）")
     print(f"  脱落 buzz_ratio<{lo}    : {len(out_low)}")
     print(f"  脱落 buzz_ratio>{hi}    : {len(out_high)}")
+    if kept:
+        brs = [r["buzz_ratio"] for r in kept]
+        print(f"  kept平均buzz_ratio      : {sum(brs)/len(brs):.3f}"
+              f"  （subset導入で急落すると早buzz過剰のサイン。GRPO前に監視）")
 
     # is_valid=False の全文正答率分布（救える余地の判定）
     from collections import Counter

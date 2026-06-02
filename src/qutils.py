@@ -144,24 +144,43 @@ def chat(client, model, prompt: str, *, max_tokens: int = 64,
 
 _PAREN_RE = re.compile(r"[（(][^）)]*[）)]")
 _HONORIFIC_RE = re.compile(r"(さん|くん|氏|博士|先生)$")
+# タイトル等の引用括弧・装飾クォートは表記ゆれの元なので除去（中身は残す）
+_QUOTE_RE = re.compile(r"[「」『』【】〔〕《》〈〉“”‘’\"']")
+_WAVE_RE = re.compile(r"[〜～~]")           # 波ダッシュの揺れ（〜/～/~）を吸収
+
+
+def _to_katakana(text: str) -> str:
+    """ひらがな→カタカナに畳んでかな表記ゆれを吸収（いんげん vs インゲン）。"""
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in text)
 
 
 def normalize(text: str) -> str:
     """日本語表記ゆれの正規化（全工程で統一して使う）。"""
     text = unicodedata.normalize("NFKC", text)
     text = _PAREN_RE.sub("", text)           # 括弧内の読み仮名を除去
+    text = _QUOTE_RE.sub("", text)           # 引用括弧・クォートを除去（中身は残す）
+    text = _WAVE_RE.sub("", text)            # 波ダッシュの揺れを吸収
     text = _HONORIFIC_RE.sub("", text.strip())  # 末尾の敬称を除去
-    return text.strip()
+    return _to_katakana(text.strip())        # 最後にかな統一
 
 
-def is_correct(pred: str, golds: Iterable[str]) -> bool:
-    """予測が正解集合のいずれかに一致（正規化後・完全一致 or 包含）すれば True。"""
+def is_correct(pred: str, golds: Iterable[str], subset_min_len: int = 2) -> bool:
+    """予測が正解集合のいずれかに一致すれば True（正規化後）。
+
+    完全一致・gold⊂pred に加え、len(pred)>=subset_min_len のときだけ pred⊂gold も許容する。
+    これで「26⊂26文字」「アガサ・クリスティ⊂…ー」を救済しつつ、"1"⊂"1600年" のような
+    短すぎる予測の誤マッチは長さガードで阻止する。早まる buzz_char は共同GRPOで再収束する前提。
+    """
     p = normalize(pred)
     if not p:
         return False
     for g in golds:
         ng = normalize(g)
-        if ng and (ng == p or ng in p):
+        if not ng:
+            continue
+        if ng == p or ng in p:
+            return True
+        if len(p) >= subset_min_len and p in ng:
             return True
     return False
 
