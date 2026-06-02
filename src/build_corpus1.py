@@ -29,6 +29,9 @@ from tqdm import tqdm
 import qutils as U
 
 BUZZ_REGION = 10  # buzz_char ± この範囲を「buzz周辺」とみなす
+# 可視reasoningはプロンプトで本文に書かせ、隠れ思考の課金は止める（Step1と同様）
+REASONING_EFFORT = "none"
+PRICE = (0.12, 0.21)  # deepseek-v4-flash $/1M（in, out）。キャッシュは効かない
 
 
 def sample_positions(buzz_char: int, L: int) -> list[int]:
@@ -55,24 +58,27 @@ def confidence_label(n: int, buzz_char: int, L: int, curve: dict) -> float:
     return round(sig, 4)
 
 
-def gen_think(client, model, prefix: str, n: int, answer: str) -> str:
+def gen_think(client, model, prefix: str, n: int, answer: str,
+              reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> str:
     prompt = (
         f"早押しクイズの問題文プレフィックス（{n}文字目まで）と正解を渡します。\n"
         f"プレフィックス: {prefix}\n正解: {answer}\n"
         f"このプレフィックスから答えを推定する思考過程を1〜2文で。解答候補と根拠のみ。"
     )
-    out = U.chat(client, model, prompt, max_tokens=96, temperature=0.7)
+    out = U.chat(client, model, prompt, max_tokens=96, temperature=0.7,
+                 reasoning_effort=reasoning_effort, meter=meter)
     return (out or "").replace("\n", " ").strip()
 
 
-def build_item(client, model, q: dict, n: int) -> dict:
+def build_item(client, model, q: dict, n: int,
+               reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> dict:
     question = q["question"]
     buzz_char = q["buzz_char"]
     L = q["question_length"]
     answer = q["answers"][0]
     prefix = question[:n]
     conf = confidence_label(n, buzz_char, L, q.get("confidence_curve", {}))
-    think = gen_think(client, model, prefix, n, answer)
+    think = gen_think(client, model, prefix, n, answer, reasoning_effort, meter)
     return {
         "messages": [
             {"role": "user", "content": f"問題文（{n}文字目まで）:\n{prefix}"},
@@ -91,7 +97,10 @@ def main() -> None:
     ap.add_argument("--out-dir", default="corpus")
     ap.add_argument("--max-workers", type=int, default=32)
     ap.add_argument("--limit", type=int, default=0, help="先頭N問のみ（パイロット）")
+    ap.add_argument("--reasoning-effort", default=REASONING_EFFORT,
+                    help="隠れ思考の課金停止。'off'/'none'/空で無効化扱い")
     args = ap.parse_args()
+    reasoning_effort = None if args.reasoning_effort in ("", "off") else args.reasoning_effort
 
     in_path = os.path.join(args.out_dir, "annotated_questions.jsonl")
     cache_path = os.path.join(args.out_dir, "corpus1_cache.jsonl")
@@ -99,7 +108,8 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     client, model = U.get_client()
-    print(f"[model] {model}")
+    meter = U.UsageMeter()
+    print(f"[model] {model}  (reasoning_effort={reasoning_effort!r})")
 
     questions = [q for q in U.read_jsonl(in_path) if q.get("is_valid") and q.get("buzz_char")]
     if args.limit:
@@ -118,7 +128,8 @@ def main() -> None:
     writer = U.JsonlWriter(cache_path)
     try:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-            futs = {ex.submit(build_item, client, model, q, n): (q, n) for (q, n) in todo}
+            futs = {ex.submit(build_item, client, model, q, n, reasoning_effort, meter): (q, n)
+                    for (q, n) in todo}
             for fut in tqdm(as_completed(futs), total=len(futs), desc="corpus1"):
                 q, n = futs[fut]
                 try:
@@ -129,6 +140,11 @@ def main() -> None:
                     pass
     finally:
         writer.close()
+
+    price = PRICE if model == "deepseek-v4-flash" else None
+    print(f"[usage] {meter.summary(price)}")
+    if meter.reasoning > 0:
+        print("[usage][警告] reasoning_tokens>0：隠れ思考が課金されている。")
 
     # qid 単位で split 出力
     splits = {s: open(os.path.join(out_dir, f"{s}.jsonl"), "w", encoding="utf-8")

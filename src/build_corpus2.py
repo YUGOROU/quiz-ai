@@ -29,18 +29,23 @@ import qutils as U
 
 # think_mode ごとの生成予算
 THINK_BUDGET = {"full": 256, "short": 96, "none": 0}
+# 可視reasoningはプロンプトで本文に書かせ、隠れ思考の課金は止める（Step1と同様）
+REASONING_EFFORT = "none"
+PRICE = (0.12, 0.21)  # deepseek-v4-flash $/1M（in, out）
 
 
 def pick_think_mode(buzz_ratio: float) -> str:
-    """早buzz（簡単）は短く、遅buzz（難問）は長く。"""
-    if buzz_ratio < 0.40:
+    """難易度（buzz_ratio）で reasoning 長を変える。簡単=no-think、難問=長いthink。
+    early-buzz（簡単）を none 化して LLM 呼び出しを省く（corpus.md「簡単=no-think」）。"""
+    if buzz_ratio < 0.35:
+        return "none"
+    if buzz_ratio < 0.55:
         return "short"
-    if buzz_ratio >= 0.65:
-        return "full"
-    return "full" if buzz_ratio >= 0.50 else "short"
+    return "full"
 
 
-def gen_reasoning(client, model, prefix: str, buzz_char: int, answer: str, mode: str) -> str:
+def gen_reasoning(client, model, prefix: str, buzz_char: int, answer: str, mode: str,
+                  reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> str:
     if mode == "none":
         return ""
     if mode == "short":
@@ -51,18 +56,21 @@ def gen_reasoning(client, model, prefix: str, buzz_char: int, answer: str, mode:
         f"早押しクイズ（{buzz_char}文字目時点）のプレフィックスと正解を渡します。\n"
         f"プレフィックス: {prefix}\n正解: {answer}\n{instr} 余分な説明不要。"
     )
-    out = U.chat(client, model, prompt, max_tokens=THINK_BUDGET[mode], temperature=0.7)
+    out = U.chat(client, model, prompt, max_tokens=THINK_BUDGET[mode], temperature=0.7,
+                 reasoning_effort=reasoning_effort, meter=meter)
     return (out or "").replace("\n", " ").strip()
 
 
-def build_item(client, model, q: dict, variant: str) -> dict:
+def build_item(client, model, q: dict, variant: str,
+               reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> dict:
     question = q["question"]
     buzz_char = q["buzz_char"]
     answer = q["answers"][0]
     end = buzz_char if variant == "exact" else min(len(question), buzz_char + 5)
     prefix = question[:end]
     mode = pick_think_mode(q["buzz_ratio"])
-    reasoning = gen_reasoning(client, model, prefix, buzz_char, answer, mode)
+    reasoning = gen_reasoning(client, model, prefix, buzz_char, answer, mode,
+                              reasoning_effort, meter)
     return {
         "messages": [
             {"role": "user", "content": f"早押しクイズ（{buzz_char}文字目時点）:\n{prefix}"},
@@ -80,7 +88,10 @@ def main() -> None:
     ap.add_argument("--out-dir", default="corpus")
     ap.add_argument("--max-workers", type=int, default=32)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--reasoning-effort", default=REASONING_EFFORT,
+                    help="隠れ思考の課金停止。'off'/'none'/空で無効化扱い")
     args = ap.parse_args()
+    reasoning_effort = None if args.reasoning_effort in ("", "off") else args.reasoning_effort
 
     in_path = os.path.join(args.out_dir, "annotated_questions.jsonl")
     cache_path = os.path.join(args.out_dir, "corpus2_cache.jsonl")
@@ -88,7 +99,8 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     client, model = U.get_client()
-    print(f"[model] {model}")
+    meter = U.UsageMeter()
+    print(f"[model] {model}  (reasoning_effort={reasoning_effort!r})")
 
     questions = [q for q in U.read_jsonl(in_path) if q.get("is_valid") and q.get("buzz_char")]
     if args.limit:
@@ -102,7 +114,8 @@ def main() -> None:
     writer = U.JsonlWriter(cache_path)
     try:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-            futs = {ex.submit(build_item, client, model, q, v): (q, v) for (q, v) in todo}
+            futs = {ex.submit(build_item, client, model, q, v, reasoning_effort, meter): (q, v)
+                    for (q, v) in todo}
             for fut in tqdm(as_completed(futs), total=len(futs), desc="corpus2"):
                 q, v = futs[fut]
                 try:
@@ -113,6 +126,11 @@ def main() -> None:
                     pass
     finally:
         writer.close()
+
+    price = PRICE if model == "deepseek-v4-flash" else None
+    print(f"[usage] {meter.summary(price)}")
+    if meter.reasoning > 0:
+        print("[usage][警告] reasoning_tokens>0：隠れ思考が課金されている。")
 
     splits = {s: open(os.path.join(out_dir, f"{s}.jsonl"), "w", encoding="utf-8")
               for s in ("train", "val", "test")}
