@@ -37,8 +37,15 @@ THRESHOLD = 0.8       # k回中 r回以上 正答（5回中4回）
 TEMPERATURE = 0.7     # 試行をばらけさせ正答率を測るため > 0
 # Step1はreasoning不要（答え1語のみ）。隠れ思考の課金を止めるため none を既定に。
 REASONING_EFFORT = "none"
-# Crof.ai deepseek-v4-flash 価格 $/1M（usageサマリのコスト概算用）
-PRICE = (0.12, 0.21)
+# Crof.ai deepseek-v4-flash 価格 $/1M（in, cache, out）。cacheは通常inの約1/40。
+PRICE = (0.12, 0.003, 0.21)
+
+# プロンプトキャッシュ整列のため固定指示を先頭・可変prefixを末尾に置く。
+# n（文字位置）は提示しない（キャッシュ分岐を防ぎ、位置提示によるbuzz後ずれも回避）。
+PROMPT_PREFIX = (
+    "次は早押しクイズの問題文の途中までです。答えを1語だけ出力し、"
+    "判断できなければ「不明」と答えてください。\n問題: "
+)
 # フィルタ条件
 MIN_QLEN = 50         # 問題文長 >= 50
 MIN_ALEN = 2          # 正解の文字数 >= 2
@@ -49,12 +56,8 @@ BUZZ_RATIO_RANGE = (0.20, 0.85)
 def eval_position(client, model, question: str, n: int, golds, k: int = K,
                   reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> float:
     """question[:n] を与えて k 回試行し、正答率（0..1）を返す。"""
-    prefix = question[:n]
-    prompt = (
-        f"以下は早押しクイズの問題文の途中（{n}文字目まで）です。\n"
-        f"問題: {prefix}\n"
-        f"答えは1語で。不明な場合は「不明」と答えてください。\nAnswer:"
-    )
+    # 固定指示を先頭に置きprefixを末尾に（プレフィックスキャッシュ整列）。
+    prompt = PROMPT_PREFIX + question[:n]
     correct = 0
     for _ in range(k):
         out = U.chat(client, model, prompt, max_tokens=32, temperature=TEMPERATURE,
@@ -81,7 +84,7 @@ def passes_prefilter(q: dict) -> bool:
     return True
 
 
-def annotate_question(client, model, q: dict, k: int = K,
+def annotate_question(client, model, q: dict, k: int = K, threshold: float = THRESHOLD,
                       reasoning_effort: str | None = REASONING_EFFORT, meter=None) -> dict:
     """1問をアノテートして結果dictを返す（失敗時 is_valid=False）。"""
     qid = q["qid"]
@@ -99,7 +102,7 @@ def annotate_question(client, model, q: dict, k: int = K,
     # 全文で答えられるか（is_valid 判定）
     full_ratio = ev(L)
     curve[L] = round(full_ratio, 3)
-    if full_ratio < THRESHOLD:
+    if full_ratio < threshold:
         return {
             "qid": qid, "question": question, "answers": golds,
             "question_length": L, "buzz_char": None, "buzz_ratio": None,
@@ -116,7 +119,7 @@ def annotate_question(client, model, q: dict, k: int = K,
         if ratio is None:
             ratio = ev(mid)
             curve[mid] = round(ratio, 3)
-        if ratio >= THRESHOLD:
+        if ratio >= threshold:
             buzz_char = mid
             hi = mid - 1
         else:
@@ -157,6 +160,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="先頭N問のみ（0=全件）。パイロット用")
     ap.add_argument("--k", type=int, default=K,
                     help="1ポジションあたりの試行数。時間/コストが厳しければ 5→3")
+    ap.add_argument("--threshold", type=float, default=THRESHOLD,
+                    help="正答とみなす最小正答率。k=3なら 0.6（3回中2回）が目安")
     ap.add_argument("--reasoning-effort", default=REASONING_EFFORT,
                     help="思考量。Step1は答え1語のみ必要なので none 既定（課金停止）。"
                          "'off'/'none'/空で無効化扱い")
@@ -171,7 +176,8 @@ def main() -> None:
 
     client, model = U.get_client()
     meter = U.UsageMeter()
-    print(f"[model] {model}  (k={args.k}, reasoning_effort={reasoning_effort!r})")
+    print(f"[model] {model}  (k={args.k}, threshold={args.threshold}, "
+          f"reasoning_effort={reasoning_effort!r})")
 
     raw = U.ensure_raw("aio_02_train.jsonl", os.path.join(args.out_dir, "raw"))
     questions = [q for q in U.read_jsonl(raw) if passes_prefilter(q)]
@@ -186,7 +192,8 @@ def main() -> None:
     try:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
             futs = {ex.submit(annotate_question, client, model, q,
-                              args.k, reasoning_effort, meter): q for q in todo}
+                              args.k, args.threshold, reasoning_effort, meter): q
+                    for q in todo}
             for fut in tqdm(as_completed(futs), total=len(futs), desc="annotate"):
                 try:
                     writer.write(fut.result())

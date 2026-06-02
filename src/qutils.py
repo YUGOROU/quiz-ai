@@ -59,33 +59,45 @@ class UsageMeter:
         self._lock = threading.Lock()
         self.calls = 0
         self.prompt = 0
+        self.cached = 0       # プロンプトキャッシュにヒットした入力トークン
         self.completion = 0
         self.reasoning = 0
+
+    @staticmethod
+    def _detail(obj, field: str) -> int:
+        if obj is None:
+            return 0
+        if isinstance(obj, dict):
+            return obj.get(field, 0) or 0
+        return getattr(obj, field, 0) or 0
 
     def add(self, usage) -> None:
         if usage is None:
             return
         pt = getattr(usage, "prompt_tokens", 0) or 0
         ct = getattr(usage, "completion_tokens", 0) or 0
-        rt = 0
-        details = getattr(usage, "completion_tokens_details", None)
-        if details is not None:
-            if isinstance(details, dict):
-                rt = details.get("reasoning_tokens", 0) or 0
-            else:
-                rt = getattr(details, "reasoning_tokens", 0) or 0
+        rt = self._detail(getattr(usage, "completion_tokens_details", None), "reasoning_tokens")
+        # キャッシュヒット数は prompt_tokens_details.cached_tokens に入る（OpenAI互換）
+        cached = self._detail(getattr(usage, "prompt_tokens_details", None), "cached_tokens")
         with self._lock:
             self.calls += 1
             self.prompt += pt
+            self.cached += cached
             self.completion += ct
             self.reasoning += rt
 
-    def summary(self, price: tuple[float, float] | None = None) -> str:
-        """price=(in,out) $/1M を渡すと概算コストも返す。"""
-        msg = (f"calls={self.calls:,} prompt={self.prompt:,} "
-               f"completion={self.completion:,}（内reasoning={self.reasoning:,}）")
+    def summary(self, price: tuple[float, ...] | None = None) -> str:
+        """price=(in,out) または (in,cache,out) $/1M を渡すと概算コストも返す。"""
+        hit = f"{self.cached / self.prompt:.0%}" if self.prompt else "-"
+        msg = (f"calls={self.calls:,} prompt={self.prompt:,}（内cache={self.cached:,}/{hit}）"
+               f" completion={self.completion:,}（内reasoning={self.reasoning:,}）")
         if price and self.calls:
-            cost = (self.prompt * price[0] + self.completion * price[1]) / 1e6
+            if len(price) >= 3:
+                p_in, p_cache, p_out = price[0], price[1], price[2]
+                uncached = max(self.prompt - self.cached, 0)
+                cost = (uncached * p_in + self.cached * p_cache + self.completion * p_out) / 1e6
+            else:
+                cost = (self.prompt * price[0] + self.completion * price[1]) / 1e6
             msg += f" / 実コスト≈${cost:.4f}（${cost / self.calls * 1000:.3f}/1kコール）"
         return msg
 
