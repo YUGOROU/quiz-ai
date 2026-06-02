@@ -40,16 +40,46 @@ def full_ratio(rec: dict) -> float | None:
     return curve.get(str(L))
 
 
-def is_correct_relaxed(pred: str, golds) -> bool:
-    """is_correct を緩和: 完全一致・包含の双方向（ng in p または p in ng）を許容。"""
-    p = U.normalize(pred)
+def _to_katakana(text: str) -> str:
+    """ひらがな→カタカナに畳んでかな表記ゆれを吸収（インゲン豆 vs いんげん豆）。"""
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in text)
+
+
+def _nk(text: str) -> str:
+    """U.normalize + かな統一。"""
+    return _to_katakana(U.normalize(text))
+
+
+def match_strict(pred: str, golds) -> bool:
+    """現行 qutils.is_correct（ng==p または ng in p）。"""
+    return U.is_correct(pred, golds)
+
+
+def match_kana(pred: str, golds) -> bool:
+    """かな統一のみ追加（安全）。ng==p または ng in p を畳んだ表記で判定。"""
+    p = _nk(pred)
     if not p:
         return False
-    for g in golds:
-        ng = U.normalize(g)
-        if ng and (ng == p or ng in p or p in ng):
-            return True
-    return False
+    return any((ng := _nk(g)) and (ng == p or ng in p) for g in golds)
+
+
+def match_kana_subset(pred: str, golds, min_len: int = 2) -> bool:
+    """かな統一 + 長さガード付き部分一致（p in ng、ただし len(p)>=min_len）。
+    短い予測の誤マッチ（"1"∈"1600年"）を防ぐ。"""
+    if match_kana(pred, golds):
+        return True
+    p = _nk(pred)
+    if len(p) < min_len:
+        return False
+    return any((ng := _nk(g)) and p in ng for g in golds)
+
+
+# 比較するマッチャ（左=安全 → 右=緩い）
+MATCHERS = {
+    "strict": match_strict,
+    "kana": match_kana,
+    "kana+sub≥2": match_kana_subset,
+}
 
 
 def bucket(fr: float | None) -> str:
@@ -66,39 +96,45 @@ def bucket(fr: float | None) -> str:
     return "[0.8, 1.0]"
 
 
-def recheck(cache_recs: list[dict], n: int, k: int = 5) -> None:
-    """is_valid=False 問題を全文で再評価し is_correct 緩和の救済効果を測る。"""
+def recheck(cache_recs: list[dict], n: int, k: int = 5, threshold: float = 0.6) -> None:
+    """is_valid=False 問題を全文で再評価し、複数マッチャの救済効果と予測を実測する。"""
     client, model = U.get_client()
     targets = [r for r in cache_recs if not r.get("is_valid")
                and r.get("question") and r.get("answers") and "error" not in r][:n]
-    print(f"\n── recheck: is_valid=False {len(targets)}問を全文k={k}で再評価 ──")
-    saved_strict = saved_relaxed = 0
+    print(f"\n── recheck: is_valid=False {len(targets)}問を全文k={k}で再評価"
+          f"（合格閾値={threshold}, 予測表示あり）──")
+    # マッチャごとに「strictでは不合格だが当該マッチャで合格」になった問題数を数える
+    saved = {name: 0 for name in MATCHERS}
     for r in targets:
         q, golds = r["question"], r["answers"]
         prompt = PROMPT_PREFIX + q
-        cs = cr = 0
+        preds: list[str] = []
+        ratios = {name: 0 for name in MATCHERS}
         for _ in range(k):
             out = U.chat(client, model, prompt, max_tokens=32, temperature=0.7,
                          reasoning_effort="none")
             if not out or "不明" in out:
                 continue
-            if U.is_correct(out, golds):
-                cs += 1
-            if is_correct_relaxed(out, golds):
-                cr += 1
-        thr = 0.8
-        ps, pr = cs / k, cr / k
-        if pr >= thr > ps:
-            saved_relaxed += 1
-            mark = "★緩和で救済"
-        elif ps >= thr:
-            saved_strict += 1
-            mark = "（再評価で合格＝kばらつき）"
-        else:
-            mark = ""
-        print(f"  {r['qid']} strict={ps:.1f} relaxed={pr:.1f} gold={golds} {mark}")
-    print(f"  → 緩和(p in ng)で新たに救済: {saved_relaxed}問 / "
-          f"再評価で合格(ばらつき): {saved_strict}問 / 対象 {len(targets)}問")
+            preds.append(out)
+            for name, fn in MATCHERS.items():
+                ratios[name] += int(fn(out, golds))
+        rr = {name: ratios[name] / k for name in MATCHERS}
+        strict_ok = rr["strict"] >= threshold
+        marks = []
+        for name in MATCHERS:
+            if name != "strict" and rr[name] >= threshold > rr["strict"]:
+                saved[name] += 1
+                marks.append(f"★{name}で救済")
+        distinct = list(dict.fromkeys(preds))[:3]
+        ratio_str = " ".join(f"{n_}={rr[n_]:.1f}" for n_ in MATCHERS)
+        print(f"  {r['qid']} {ratio_str} gold={golds} {' '.join(marks)}")
+        print(f"      予測例: {distinct}")
+    print("\n  --- 救済集計（strict不合格→各マッチャで合格になった数）---")
+    for name in MATCHERS:
+        if name == "strict":
+            continue
+        print(f"  {name:12}: +{saved[name]}問 / 対象 {len(targets)}問")
+    print("  ※ kana の増分は安全に取り込める。kana+sub≥2 の追加増分は誤マッチ要注意。")
 
 
 def main() -> None:
@@ -106,6 +142,8 @@ def main() -> None:
     ap.add_argument("--cache", default="corpus_pilot2/annotation_cache.jsonl")
     ap.add_argument("--recheck", action="store_true")
     ap.add_argument("--n-recheck", type=int, default=20)
+    ap.add_argument("--threshold", type=float, default=0.6,
+                    help="recheckで合格とみなす最小正答率（annotate実行時の--thresholdに合わせる）")
     args = ap.parse_args()
 
     recs = list(U.read_jsonl(args.cache))
@@ -137,7 +175,7 @@ def main() -> None:
     print("  ※ [0.4,0.6) や [0.6,0.8) が多いほど is_correct 緩和 / k調整で救える余地が大きい")
 
     if args.recheck:
-        recheck(recs, args.n_recheck)
+        recheck(recs, args.n_recheck, threshold=args.threshold)
 
 
 if __name__ == "__main__":
