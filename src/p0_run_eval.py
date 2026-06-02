@@ -52,11 +52,16 @@ async def main_async(args) -> None:
     if not questions:
         raise SystemExit(f"有効な問題が見つかりません: {args.infile}（先に annotate.py を実行）")
 
-    llm = MainLLM(max_tokens=args.max_tokens)
-    print(f"[model] {llm.model} / 問題数 {len(questions)} / realtime={not args.fast}")
+    llm = MainLLM(max_tokens=args.max_tokens, temperature=args.temperature,
+                  reasoning_effort=args.reasoning_effort or None)
+    # --full-text: 全文を投入し、成功基準「全文入力での正解率≥60%」を測る
+    buzz_ratio = 1.0 if args.full_text else args.buzz_ratio
+    mode = "全文サニティ" if args.full_text else f"prefix {buzz_ratio:.0%}"
+    print(f"[model] {llm.model} / 問題数 {len(questions)} / realtime={not args.fast} "
+          f"/ mode={mode} / temp={args.temperature} / effort={args.reasoning_effort or 'none'}")
 
     base = EpisodeConfig(
-        buzz_ratio=args.buzz_ratio, spec_lead=args.spec_lead,
+        buzz_ratio=buzz_ratio, spec_lead=args.spec_lead,
         char_rate=args.char_rate, realtime=not args.fast,
     )
 
@@ -68,6 +73,20 @@ async def main_async(args) -> None:
             cfg.reset_at = max(1, int(len(q["question"]) * args.buzz_ratio) - 3)
         r = await run_episode(llm, q["qid"], q["question"], q["answers"], cfg, U.is_correct)
         results.append(r)
+
+    # ── 生出力ダンプ（10%FAILの切り分け用） ──────────────────────
+    if args.dump:
+        print(f"\n=== 生出力ダンプ（先頭{args.dump}件） ===")
+        for q, r in list(zip(questions, results))[: args.dump]:
+            prefix = q["question"][: r.buzz_pos]
+            mark = "✅" if r.correct else "❌"
+            print(f"\n{mark} {r.qid}  gold={q['answers']}")
+            print(f"  prefix({r.buzz_pos}字): {prefix}")
+            print(f"  answer : {r.answer!r}")
+            print(f"  reason : {r.reasoning[:120]!r}")
+            print(f"  raw    : {r.raw[:200]!r}")
+            if r.error:
+                print(f"  error  : {r.error}")
 
     ok = [r for r in results if r.error is None]
     errs = [r for r in results if r.error is not None]
@@ -92,8 +111,10 @@ async def main_async(args) -> None:
         "llm_total_s_mean": round(stats.mean(totals), 3) if totals else 0.0,
         "spec_done_before_buzz_rate": round(spec_hits / len(ok), 4) if ok else 0.0,
         "n_cancellations": n_cancel,
-        "config": {"buzz_ratio": args.buzz_ratio, "spec_lead": args.spec_lead,
-                   "char_rate": args.char_rate, "realtime": not args.fast},
+        "config": {"buzz_ratio": buzz_ratio, "full_text": args.full_text,
+                   "spec_lead": args.spec_lead, "char_rate": args.char_rate,
+                   "realtime": not args.fast, "temperature": args.temperature,
+                   "reasoning_effort": args.reasoning_effort or None},
     }
 
     print("\n=== Phase 0a レポート ===")
@@ -119,6 +140,12 @@ def main() -> None:
     ap.add_argument("--spec-lead", type=int, default=8, help="buzzの何文字手前で投機開始")
     ap.add_argument("--char-rate", type=float, default=12.0)
     ap.add_argument("--max-tokens", type=int, default=256)
+    ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--reasoning-effort", default="low",
+                    help="gpt-oss の思考量（low/medium/high）。空文字で無効化")
+    ap.add_argument("--full-text", action="store_true",
+                    help="全文を投入し成功基準（全文正解率≥60%）を測るサニティモード")
+    ap.add_argument("--dump", type=int, default=0, help="先頭N件の生出力を表示し10%%FAILを切り分ける")
     ap.add_argument("--fast", action="store_true", help="実時間シミュレートを省略（正解率の素早い確認用）")
     ap.add_argument("--reset-frac", type=float, default=0.0,
                     help="この割合の問題に前提ズレを注入しキャンセル機構をテスト")

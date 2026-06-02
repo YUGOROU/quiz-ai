@@ -49,6 +49,7 @@ class EpisodeResult:
     llm_total: float
     n_cancellations: int
     reasoning: str = ""
+    raw: str = ""
     error: str | None = None
 
 
@@ -132,5 +133,6 @@ async def run_episode(
         llm_total=round(result.total, 4) if result else 0.0,
         n_cancellations=n_cancel,
         reasoning=result.reasoning if result else "",
+        raw=result.raw if result else "",
         error=error,
     )
