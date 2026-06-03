@@ -127,7 +127,14 @@ def main() -> None:
     finally:
         writer.close()
 
-    price = PRICE if model == "deepseek-v4-flash" else None
+    # 価格は provider 依存（$/1M, in/out）。Crof.ai と Novita(HF経由)で異なる。
+    ml = model.lower()
+    if model == "deepseek-v4-flash":
+        price = PRICE                       # Crof.ai
+    elif "deepseek-v4-flash" in ml:
+        price = (0.14, 0.28)                # Novita（HF Inference Providers経由）
+    else:
+        price = None
     print(f"[usage] {meter.summary(price)}")
     if meter.reasoning > 0:
         print("[usage][警告] reasoning_tokens>0：隠れ思考が課金されている。")
