@@ -40,7 +40,12 @@ def get_client():
 
     hf = os.environ.get("HF_TOKEN")
     if hf:
-        return OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf), "openai/gpt-oss-120b:cerebras"
+        # HF Inference Providers 経由。SYNTH_MODEL で provider 込みのモデルIDを差し替え可能。
+        # 例) Crof.ai 障害時の一時避難: SYNTH_MODEL="deepseek-ai/DeepSeek-V4-Flash:novita"
+        # 既定はRL対戦相手にも使う gpt-oss-120b:cerebras。
+        # 注意: Novita等に逃がす時は CROFAI_API_KEY を未設定にする（このブランチに入れるため）。
+        model = os.environ.get("SYNTH_MODEL", "openai/gpt-oss-120b:cerebras")
+        return OpenAI(base_url="https://router.huggingface.co/v1", api_key=hf), model
 
     raise RuntimeError(
         "APIの認証情報がありません。CROFAI_API_KEY と CROFAI_BASE_URL "
@@ -118,6 +123,13 @@ def chat(client, model, prompt: str, *, max_tokens: int = 64,
     extra_body: dict = {}
     if reasoning_effort:
         extra_body["reasoning_effort"] = reasoning_effort
+    # provider依存の追加bodyを環境変数で注入（呼び出し側を触らず切替）。
+    # 例) Novita の DeepSeek-V4-Flash で隠れ思考を切る:
+    #     SYNTH_EXTRA_BODY='{"enable_thinking": false}'
+    #   （Crofの reasoning_effort="none" はNovita router では無視されるため。top-levelで渡す）
+    _env_extra = os.environ.get("SYNTH_EXTRA_BODY")
+    if _env_extra:
+        extra_body.update(json.loads(_env_extra))
     delay = 1.0
     for attempt in range(retries):
         try:
