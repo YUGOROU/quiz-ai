@@ -35,6 +35,7 @@ image = (
         "datasets",
         "huggingface_hub",
         "hf_transfer",
+        "nvidia-ml-py",  # pynvml: GPU利用率%・メモリの周期サンプリング
     )
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",  # 並列高速DL

@@ -77,6 +77,50 @@ TARGET_MODULES = [
 ]
 
 
+def start_gpu_sampler(interval: float = 2.0):
+    """別スレッドで nvml の GPU 利用率%・メモリ使用量を周期サンプリング。
+    torch は SM 利用率を出せないため、Modal ダッシュボード相当の実測を CLI ログに残す。
+    戻り値 (stop_event, samples, thread)。pynvml 不在/非GPUなら None。"""
+    import threading
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+    except Exception as e:  # noqa: BLE001
+        print(f"[gpu] sampler 無効（pynvml不可）: {e}")
+        return None
+    samples = {"util": [], "mem_gb": []}
+    stop = threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                samples["util"].append(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
+                samples["mem_gb"].append(pynvml.nvmlDeviceGetMemoryInfo(h).used / 1024**3)
+            except Exception:  # noqa: BLE001
+                pass
+            stop.wait(interval)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return stop, samples, t
+
+
+def report_gpu_sampler(sampler):
+    """start_gpu_sampler の結果を集計してログ出力。"""
+    if not sampler:
+        return
+    import statistics
+    stop, samples, t = sampler
+    stop.set()
+    t.join(timeout=5)
+    u, m = samples["util"], samples["mem_gb"]
+    if u:
+        print(f"[gpu] SM利用率% min/mean/max = {min(u)}/{statistics.mean(u):.0f}/{max(u)}  "
+              f"nvmlメモリGiB mean/max = {statistics.mean(m):.2f}/{max(m):.2f}  "
+              f"samples={len(u)} (interval毎)")
+
+
 def build_dataset(tokenizer, data_root: str, subdir: str, split: str):
     """corpus の {split}.jsonl を読み、chatml 整形した text 列を作る。"""
     from datasets import load_dataset
@@ -190,7 +234,9 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
 
     import torch
 
+    sampler = start_gpu_sampler(interval=2.0)  # nvml で GPU利用率%・メモリを周期計測
     stats = trainer.train()
+    report_gpu_sampler(sampler)
 
     # GPU メモリ実測（バッチ調整の指標。allocated=テンソル実体 / reserved=確保枠）
     peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
