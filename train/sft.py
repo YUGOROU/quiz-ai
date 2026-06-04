@@ -151,6 +151,15 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
     bs = batch_size or cfg["per_device_train_batch_size"]
     ga = grad_accum or cfg["gradient_accumulation_steps"]
 
+    # push 指定時は訓練前に write トークンを fail-fast 検証（2h訓練後の push 失敗を防ぐ）
+    if push_to_hub:
+        from huggingface_hub import HfApi
+        who = HfApi().whoami(token=os.environ.get("HF_TOKEN"))
+        role = who.get("auth", {}).get("accessToken", {}).get("role")
+        print(f"[sft] HF token: name={who.get('name')} role={role}")
+        if role != "write":
+            raise SystemExit("HF_TOKEN に write 権限なし。Modal Secret 'huggingface' を更新せよ")
+
     # ⚠ 遅延 import（unsloth を最初に＝transformers/trl へのパッチ適用のため）
     from unsloth import FastModel
     from unsloth.chat_templates import get_chat_template, train_on_responses_only
