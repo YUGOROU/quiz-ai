@@ -58,8 +58,10 @@ CONFIGS = {
         lora_dropout=0.0,
         learning_rate=1e-4,
         num_train_epochs=2,
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=4,
+        # バッチ較正(2026-06-04 A100 40GB): bs=8→9.93GiB, bs=32→15.7GiB（固定~8GiB+0.24GiB/sample）。
+        # bs=64 で推定 ~23GiB(≈58%) と安全マージンを残しつつGPU飽和度を改善。実効batch=64。
+        per_device_train_batch_size=64,
+        gradient_accumulation_steps=1,
         warmup_ratio=0.03,
     ),
 }
@@ -95,10 +97,15 @@ def build_dataset(tokenizer, data_root: str, subdir: str, split: str):
 
 
 def train(target: str, data_root: str, out_root: str, seed: int = 3407,
-          push_to_hub: str | None = None, max_steps: int = 0):
+          push_to_hub: str | None = None, hub_private: bool = True,
+          max_steps: int = 0, batch_size: int = 0, grad_accum: int = 0):
     if target not in CONFIGS:
         raise SystemExit(f"--target は {list(CONFIGS)} のいずれか")
     cfg = CONFIGS[target]
+
+    # バッチ等は CLI 上書き可（>0 で優先）。CONFIGS は baked なので再ビルド不要で調整するため。
+    bs = batch_size or cfg["per_device_train_batch_size"]
+    ga = grad_accum or cfg["gradient_accumulation_steps"]
 
     # ⚠ 遅延 import（unsloth を最初に＝transformers/trl へのパッチ適用のため）
     from unsloth import FastModel
@@ -138,7 +145,8 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
     val_ds = build_dataset(tokenizer, data_root, cfg["data_subdir"], "val")
     if train_ds is None:
         raise SystemExit(f"train.jsonl が見つからない: {data_root}/{cfg['data_subdir']}")
-    print(f"[sft] train={len(train_ds)}  val={len(val_ds) if val_ds else 0}")
+    print(f"[sft] train={len(train_ds)}  val={len(val_ds) if val_ds else 0}  "
+          f"per_device_bs={bs} grad_accum={ga} effective_bs={bs * ga}")
 
     # --- 訓練 ---
     # max_steps>0 のとき疎通run（数stepで停止・課金最小）。eval/save も省く。
@@ -148,8 +156,8 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
         dataset_text_field="text",
         max_seq_length=cfg["max_seq_length"],
         packing=False,  # response-only マスクのため packing は無効
-        per_device_train_batch_size=cfg["per_device_train_batch_size"],
-        gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
+        per_device_train_batch_size=bs,
+        gradient_accumulation_steps=ga,
         max_steps=max_steps if smoke else -1,
         num_train_epochs=cfg["num_train_epochs"],
         learning_rate=cfg["learning_rate"],
@@ -180,18 +188,40 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
         response_part=RESPONSE_PART,
     )
 
-    trainer.train()
+    import torch
 
-    # LoRA アダプタを保存（重みマージは推論セットアップ側で実施）
+    stats = trainer.train()
+
+    # GPU メモリ実測（バッチ調整の指標。allocated=テンソル実体 / reserved=確保枠）
+    peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
+    peak_resv = torch.cuda.max_memory_reserved() / 1024**3
+    total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    print(f"[sft] peak GPU mem: allocated={peak_alloc:.2f} / reserved={peak_resv:.2f} "
+          f"/ total={total:.1f} GiB  (利用率 {peak_resv / total * 100:.0f}%)")
+    m = stats.metrics
+    print(f"[sft] throughput: {m.get('train_samples_per_second')} samples/s  "
+          f"runtime={m.get('train_runtime')}s  train_loss={m.get('train_loss')}")
+
+    # LoRA アダプタを保存（推論はアダプタ or マージ済みのどちらでも可）
     model.save_pretrained(out_dir)
     tokenizer.save_pretrained(out_dir)
     print(f"[sft] saved LoRA adapter -> {out_dir}")
 
     if push_to_hub:
-        # ⚠ ライセンス: コーパス由来の重みは Private で。帰属表記は quiz-ai.md 参照
-        model.push_to_hub(push_to_hub, private=True)
-        tokenizer.push_to_hub(push_to_hub, private=True)
-        print(f"[sft] pushed (private) -> {push_to_hub}")
+        # ⚠ ライセンス: コーパス由来の重み。既定 Private（quiz-ai.md 帰属表記を参照）。
+        # アダプタのみ {repo}-lora / マージ済み16bit {repo}-merged の2種を上げる。
+        token = os.environ.get("HF_TOKEN")  # Modal Secret 'huggingface' から注入
+        lora_repo = f"{push_to_hub}-lora"
+        merged_repo = f"{push_to_hub}-merged"
+
+        model.push_to_hub(lora_repo, token=token, private=hub_private)
+        tokenizer.push_to_hub(lora_repo, token=token, private=hub_private)
+        print(f"[sft] pushed adapter ({'private' if hub_private else 'public'}) -> {lora_repo}")
+
+        # マージ済み（16bit）。QLoRA(4bit)ベースは dequant してから LoRA をマージ。
+        model.push_to_hub_merged(merged_repo, tokenizer, save_method="merged_16bit",
+                                 token=token, private=hub_private)
+        print(f"[sft] pushed merged 16bit ({'private' if hub_private else 'public'}) -> {merged_repo}")
 
 
 def main():
@@ -202,12 +232,19 @@ def main():
     ap.add_argument("--out-root", default="outputs")
     ap.add_argument("--seed", type=int, default=3407)
     ap.add_argument("--push-to-hub", default=None,
-                    help="HF repo id（Private 推奨）。未指定ならローカル保存のみ")
+                    help="HF repo id プレフィックス。{repo}-lora と {repo}-merged を上げる")
+    ap.add_argument("--public", action="store_true",
+                    help="HF に public で上げる（既定は private）")
     ap.add_argument("--max-steps", type=int, default=0,
                     help=">0 で疎通run（数stepで停止・eval/save省略）。0で本番")
+    ap.add_argument("--batch-size", type=int, default=0,
+                    help="per_device バッチ上書き（0でCONFIGS既定）")
+    ap.add_argument("--grad-accum", type=int, default=0,
+                    help="勾配累積上書き（0でCONFIGS既定）")
     a = ap.parse_args()
     train(a.target, os.path.expanduser(a.data_root), os.path.expanduser(a.out_root),
-          seed=a.seed, push_to_hub=a.push_to_hub, max_steps=a.max_steps)
+          seed=a.seed, push_to_hub=a.push_to_hub, hub_private=not a.public,
+          max_steps=a.max_steps, batch_size=a.batch_size, grad_accum=a.grad_accum)
 
 
 if __name__ == "__main__":
