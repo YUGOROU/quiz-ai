@@ -96,7 +96,7 @@ def build_dataset(tokenizer, data_root: str, subdir: str, split: str):
 
 
 def train(target: str, data_root: str, out_root: str, seed: int = 3407,
-          push_to_hub: str | None = None):
+          push_to_hub: str | None = None, max_steps: int = 0):
     if target not in CONFIGS:
         raise SystemExit(f"--target は {list(CONFIGS)} のいずれか")
     cfg = CONFIGS[target]
@@ -135,6 +135,8 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
     print(f"[sft] train={len(train_ds)}  val={len(val_ds) if val_ds else 0}")
 
     # --- 訓練 ---
+    # max_steps>0 のとき疎通run（数stepで停止・課金最小）。eval/save も省く。
+    smoke = max_steps > 0
     sft_cfg = SFTConfig(
         output_dir=out_dir,
         dataset_text_field="text",
@@ -142,15 +144,16 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
         packing=False,  # response-only マスクのため packing は無効
         per_device_train_batch_size=cfg["per_device_train_batch_size"],
         gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
+        max_steps=max_steps if smoke else -1,
         num_train_epochs=cfg["num_train_epochs"],
         learning_rate=cfg["learning_rate"],
         warmup_ratio=cfg["warmup_ratio"],
         lr_scheduler_type="cosine",
         optim="adamw_8bit",
         weight_decay=0.01,
-        logging_steps=10,
-        save_strategy="epoch",
-        eval_strategy="epoch" if val_ds is not None else "no",
+        logging_steps=10 if not smoke else 1,
+        save_strategy="no" if smoke else "epoch",
+        eval_strategy="no" if smoke or val_ds is None else "epoch",
         bf16=True,
         seed=seed,
         report_to="none",
@@ -194,9 +197,11 @@ def main():
     ap.add_argument("--seed", type=int, default=3407)
     ap.add_argument("--push-to-hub", default=None,
                     help="HF repo id（Private 推奨）。未指定ならローカル保存のみ")
+    ap.add_argument("--max-steps", type=int, default=0,
+                    help=">0 で疎通run（数stepで停止・eval/save省略）。0で本番")
     a = ap.parse_args()
     train(a.target, os.path.expanduser(a.data_root), os.path.expanduser(a.out_root),
-          seed=a.seed, push_to_hub=a.push_to_hub)
+          seed=a.seed, push_to_hub=a.push_to_hub, max_steps=a.max_steps)
 
 
 if __name__ == "__main__":
