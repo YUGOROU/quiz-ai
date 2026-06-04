@@ -25,15 +25,21 @@ app = modal.App("quiz-sft")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-# unsloth は torch/cuda 同梱版を pip 解決させる。バージョンは適宜固定推奨。
+# 依存解決は uv（pip より高速）。hf_transfer で重みDLを並列高速化。
+# HF_HOME=/hf に向けてモデルキャッシュを Volume 永続化 → 2回目以降の run は再DLなし。
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
+    .uv_pip_install(
         "unsloth",
         "trl>=0.12",
         "datasets",
         "huggingface_hub",
+        "hf_transfer",
     )
+    .env({
+        "HF_HUB_ENABLE_HF_TRANSFER": "1",  # 並列高速DL
+        "HF_HOME": "/hf",                  # モデルキャッシュは hf-cache Volume へ
+    })
     # train/sft.py を /root に同梱（import せずファイルコピー。Mac に unsloth が無いため
     # add_local_python_source だとローカル import で落ちる）。/root は remote の sys.path 上。
     .add_local_file(os.path.join(_HERE, "sft.py"), "/root/sft.py")
@@ -41,6 +47,8 @@ image = (
 
 # コーパス Volume（/data にマウント）。出力も同じ Volume の /out へ。
 corpus_vol = modal.Volume.from_name("quiz-corpus", create_if_missing=True)
+# HF モデルキャッシュ Volume（初回DLのみ・以降の run で再利用しDL時間ゼロに）。
+hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
 
 # HF Private モデル DL / push 用トークン（必要なら）
 secrets = [modal.Secret.from_name("huggingface")] if False else []
@@ -49,7 +57,7 @@ secrets = [modal.Secret.from_name("huggingface")] if False else []
 @app.function(
     gpu="A100-40GB",
     timeout=60 * 60 * 12,          # 最長 12h（無料枠 ~14h/月に収める）
-    volumes={"/data": corpus_vol},
+    volumes={"/data": corpus_vol, "/hf": hf_cache},
     secrets=secrets,
 )
 def run(target: str, push_to_hub: str | None = None, max_steps: int = 0):
@@ -64,6 +72,7 @@ def run(target: str, push_to_hub: str | None = None, max_steps: int = 0):
         max_steps=max_steps,
     )
     corpus_vol.commit()  # 出力を永続化
+    hf_cache.commit()    # DLしたモデル重みを永続化（次回 run で再DLしない）
 
 
 @app.local_entrypoint()
