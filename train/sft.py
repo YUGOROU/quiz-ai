@@ -16,16 +16,13 @@ Modal 経由は train/modal_sft.py、依存は train/README.md を参照。
   python train/sft.py --target main --data-root <corpusの親> --out-root outputs
 """
 
-# ⚠ unsloth は torch/transformers より前に import する（最適化パッチのため）
-from unsloth import FastModel
-from unsloth.chat_templates import get_chat_template, train_on_responses_only
-
+# ⚠ unsloth / trl / transformers / datasets は train() 内で遅延 import する。
+#   理由: モジュールトップで import すると、Modal の add_local_python_source が
+#   このファイルを Mac 上でローカル import した際に unsloth 不在で落ちる。
+#   遅延させればモジュールトップは stdlib のみ＝どこでも import 可能になる。
+#   遅延 import 時も「unsloth を transformers/trl より先」の順序を守ること。
 import argparse
 import os
-
-from datasets import load_dataset
-from transformers import set_seed
-from trl import SFTConfig, SFTTrainer
 
 # chatml マーカー（Base モデルに後付け）。推論側もこの整形に合わせる。
 INSTRUCTION_PART = "<|im_start|>user\n"
@@ -80,6 +77,8 @@ TARGET_MODULES = [
 
 def build_dataset(tokenizer, data_root: str, subdir: str, split: str):
     """corpus の {split}.jsonl を読み、chatml 整形した text 列を作る。"""
+    from datasets import load_dataset
+
     path = os.path.join(data_root, subdir, f"{split}.jsonl")
     if not os.path.exists(path):
         return None
@@ -100,6 +99,13 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
     if target not in CONFIGS:
         raise SystemExit(f"--target は {list(CONFIGS)} のいずれか")
     cfg = CONFIGS[target]
+
+    # ⚠ 遅延 import（unsloth を最初に＝transformers/trl へのパッチ適用のため）
+    from unsloth import FastModel
+    from unsloth.chat_templates import get_chat_template, train_on_responses_only
+    from transformers import set_seed
+    from trl import SFTConfig, SFTTrainer
+
     set_seed(seed)
 
     out_dir = os.path.join(out_root, f"{target}_sft")

@@ -40,10 +40,13 @@ image = (
         "HF_HUB_ENABLE_HF_TRANSFER": "1",  # 並列高速DL
         "HF_HOME": "/hf",                  # モデルキャッシュは hf-cache Volume へ
     })
-    # train/sft.py を /root に同梱（import せずファイルコピー。Mac に unsloth が無いため
-    # add_local_python_source だとローカル import で落ちる）。/root は remote の sys.path 上。
-    .add_local_file(os.path.join(_HERE, "sft.py"), "/root/sft.py")
+    # train/ を /opt/quizsft に copy=True で bake（イメージ層に確実に焼く）。
+    # sft.py は重い import を遅延させてあるのでローカル import 不要。実行時に sys.path へ。
+    .add_local_dir(_HERE, "/opt/quizsft", copy=True,
+                   ignore=["__pycache__", "*.pyc", "*.md"])
 )
+
+SRC_DIR = "/opt/quizsft"
 
 # コーパス Volume（/data にマウント）。出力も同じ Volume の /out へ。
 corpus_vol = modal.Volume.from_name("quiz-corpus", create_if_missing=True)
@@ -55,13 +58,16 @@ secrets = [modal.Secret.from_name("huggingface")] if False else []
 
 
 @app.function(
+    image=image,                   # ⚠ 必須: 未指定だとデフォルト image になり unsloth/sft 不在
     gpu="A100-40GB",
     timeout=60 * 60 * 12,          # 最長 12h（無料枠 ~14h/月に収める）
     volumes={"/data": corpus_vol, "/hf": hf_cache},
     secrets=secrets,
 )
 def run(target: str, push_to_hub: str | None = None, max_steps: int = 0):
-    import sft  # イメージ同梱の train/sft.py
+    import sys
+    sys.path.insert(0, SRC_DIR)  # add_local_dir で bake した /opt/quizsft
+    import sft  # コア訓練ロジック（sft.py）
 
     # Volume 直下に sft_corpus_1/ sft_corpus_2/ がある前提
     sft.train(

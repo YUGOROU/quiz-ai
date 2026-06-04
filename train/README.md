@@ -27,17 +27,31 @@
 ### A) Modal A100（推奨・無料枠）
 
 ```bash
-pip install modal && modal token new
+uv tool install modal && modal setup        # ブラウザ認証
 modal volume create quiz-corpus
-modal volume put quiz-corpus ~/quiz-ai-corpus/corpus/sft_corpus_1 /sft_corpus_1
 modal volume put quiz-corpus ~/quiz-ai-corpus/corpus/sft_corpus_2 /sft_corpus_2
+# corpus-1 完走後: modal volume put quiz-corpus ~/quiz-ai-corpus/corpus/sft_corpus_1 /sft_corpus_1
 
-modal run train/modal_sft.py --target buzz
+# 疎通run（10step・課金最小。設定の妥当性を安く検証）
+modal run train/modal_sft.py --target main --max-steps 10
+# 本番run
 modal run train/modal_sft.py --target main
 modal volume get quiz-corpus /out/main_sft ./outputs/main_sft
 ```
 
 無料枠は月~14h。`main`(9B QLoRA) を優先し、`buzz`(350M) は軽いので Vast/ローカルでも可。
+**支出上限**: ワークスペースの spend limit に達すると `App creation failed` で即死する
+（Modal ダッシュボード Settings → Usage で引き上げ）。
+
+#### 疎通run 実測（2026-06-04・A100 40GB）
+
+- ✅ unsloth 2026.6.1 が `Qwen3_5` をネイティブ patch、**OOMなし**で 9B QLoRA がA100 40GBに載る。
+- ✅ LoRA trainable 58.2M / 9.47B (0.61%)、`TARGET_MODULES` 標準集合で通過。
+- ✅ chatml + response-only 損失で loss 1.90→1.32 と低下。
+- 速度 **~9.6s/step（3.3 samples/s）** → corpus-2 本番 ~767step ≈ **約2時間**。
+- モデル重みは `hf-cache` Volume に永続化済み → 次回 run は**再DLなし**。
+- ⚠ `image=image` を `@app.function` に必ず渡すこと（未指定だとデフォルト image になり
+  unsloth/sft 不在で `ModuleNotFoundError`）。
 
 ### B) GPU 機で直接（Vast.ai 5090 等）
 
