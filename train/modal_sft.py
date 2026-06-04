@@ -61,6 +61,8 @@ secrets = [modal.Secret.from_name("huggingface")]
 @app.function(
     image=image,                   # ⚠ 必須: 未指定だとデフォルト image になり unsloth/sft 不在
     gpu="A100-40GB",
+    cpu=8.0,                       # 既定~1コアだと dataloader が律速し GPU利用率が頭打ち
+                                   # （bs=32 較正で CPU 0.95/1.01・GPU util 34%）。8コア確保。
     timeout=60 * 60 * 12,          # 最長 12h（無料枠 ~14h/月に収める）
     volumes={"/data": corpus_vol, "/hf": hf_cache},
     secrets=secrets,

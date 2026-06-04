@@ -213,6 +213,10 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
         save_strategy="no" if smoke else "epoch",
         eval_strategy="no" if smoke or val_ds is None else "epoch",
         bf16=True,
+        # データ供給律速の解消（bs=32較正で GPU util 34%・CPU 1コア張り付き）。
+        # Modal 側 cpu=8 と合わせ、tokenize/collate を並列化して A100 を飽和させる。
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
         seed=seed,
         report_to="none",
     )
