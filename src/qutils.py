@@ -107,6 +107,23 @@ class UsageMeter:
         return msg
 
 
+class CreditDepletedError(RuntimeError):
+    """与信枯渇（HTTP 402 Payment Required）。HF Inference 等の月次クレジット切れ。
+
+    backoff 再試行では回復しない（残額が増えない限り全コールが 402）ので、握り潰さず
+    即時に投げて呼び出し側で run を停止させる。空きを使い切るまで無駄に叩き続けるのを防ぐ。
+    """
+
+
+def _is_402(e: Exception) -> bool:
+    """例外が 402（与信枯渇）由来か判定。SDK の status_code を優先し、文字列にフォールバック。"""
+    code = getattr(e, "status_code", None) or getattr(e, "code", None)
+    if code == 402:
+        return True
+    s = str(e).lower()
+    return "402" in s and any(k in s for k in ("payment", "depleted", "credit", "quota"))
+
+
 def chat(client, model, prompt: str, *, max_tokens: int = 64,
          temperature: float = 0.0, retries: int = 6,
          reasoning_effort: str | None = None,
@@ -119,6 +136,7 @@ def chat(client, model, prompt: str, *, max_tokens: int = 64,
     meter: 渡すと usage を集計する（本番前のコスト実測用）。
 
     全試行失敗時は None を返す（呼び出し側でスキップ扱い）。
+    402（与信枯渇）だけは再試行せず CreditDepletedError を投げる（run 停止用）。
     """
     extra_body: dict = {}
     if reasoning_effort:
@@ -142,8 +160,19 @@ def chat(client, model, prompt: str, *, max_tokens: int = 64,
             )
             if meter is not None:
                 meter.add(getattr(resp, "usage", None))
-            return (resp.choices[0].message.content or "").strip()
+            content = (resp.choices[0].message.content or "").strip()
+            # Novita等のthrottlingは例外でなく「200で空content」を返す。
+            # 空応答を成功扱いすると壊れた訓練データ（空<think>）が cache に入るため、
+            # 例外と同様に backoff 再試行する。全試行で空なら "" を返し、呼び出し側で弾く。
+            if not content and attempt < retries - 1:
+                time.sleep(delay + (os.urandom(1)[0] / 255.0))
+                delay = min(delay * 2, 30.0)
+                continue
+            return content
         except Exception as e:  # noqa: BLE001 — provider横断で広く捕捉
+            # 402（与信枯渇）は再試行しても回復しない → 即停止用に投げて呼び出し側へ伝播。
+            if _is_402(e):
+                raise CreditDepletedError(str(e)[:300]) from e
             if attempt == retries - 1:
                 return None
             # 429やネットワーク揺らぎを想定。指数バックオフ + 軽いジッタ。
@@ -176,23 +205,65 @@ def normalize(text: str) -> str:
     return _to_katakana(text.strip())        # 最後にかな統一
 
 
-def is_correct(pred: str, golds: Iterable[str], subset_min_len: int = 2) -> bool:
+# ── loose（早押し読み上げ判定相当の緩和） ──────────────────────────
+# 長音記号「ー」・中黒・半角中黒・空白を落とす。読み上げでは同一に聞こえる表記ゆれ。
+_LOOSE_DROP_RE = re.compile(r"[ー・･\s]")
+# 小書きカナを大書きに畳む（ティ↔テ等の小書き揺れ吸収。ァ→ア …）
+_SMALL_TO_FULL = str.maketrans("ァィゥェォャュョッヮ", "アイウエオヤユヨツワ")
+
+
+def _loose_form(text: str) -> str:
+    """normalize の上に、早押し読み上げ判定向けの追加吸収を重ねる。
+    長音「ー」・中黒・空白を除去し、小書きカナを大書きに畳む。
+    例: ユーティリティープレイヤー ≡ ユーティリティプレイヤー。"""
+    t = normalize(text)
+    t = _LOOSE_DROP_RE.sub("", t)
+    return t.translate(_SMALL_TO_FULL)
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """編集距離（loose の僅差許容に使う・外部依存なしの2行DP）。"""
+    if a == b:
+        return 0
+    if not a or not b:
+        return len(a) or len(b)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def is_correct(pred: str, golds: Iterable[str], subset_min_len: int = 2, *,
+               loose: bool = False, max_edits: int = 1,
+               loose_min_len: int = 4) -> bool:
     """予測が正解集合のいずれかに一致すれば True（正規化後）。
 
     完全一致・gold⊂pred に加え、len(pred)>=subset_min_len のときだけ pred⊂gold も許容する。
     これで「26⊂26文字」「アガサ・クリスティ⊂…ー」を救済しつつ、"1"⊂"1600年" のような
     短すぎる予測の誤マッチは長さガードで阻止する。早まる buzz_char は共同GRPOで再収束する前提。
+
+    loose=True で実際の早押し読み上げ判定に寄せる: 長音/中黒/空白/小書きカナを吸収した
+    上で照合し、さらに正規化後の編集距離が max_edits 以下（双方 loose_min_len 文字以上の
+    ときのみ）なら正解扱い。「ユーティリティ(ー)プレイヤー」級の表記ゆれを救済する一方、
+    距離2の翻字違い（スーラ vs セーラン 等）は通さない。既定 loose=False で従来挙動。
     """
-    p = normalize(pred)
+    norm = _loose_form if loose else normalize
+    p = norm(pred)
     if not p:
         return False
     for g in golds:
-        ng = normalize(g)
+        ng = norm(g)
         if not ng:
             continue
         if ng == p or ng in p:
             return True
         if len(p) >= subset_min_len and p in ng:
+            return True
+        if (loose and max_edits > 0 and min(len(p), len(ng)) >= loose_min_len
+                and _levenshtein(p, ng) <= max_edits):
             return True
     return False
 

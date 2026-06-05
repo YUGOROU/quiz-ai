@@ -142,14 +142,29 @@ def build_dataset(tokenizer, data_root: str, subdir: str, split: str):
 
 def train(target: str, data_root: str, out_root: str, seed: int = 3407,
           push_to_hub: str | None = None, hub_private: bool = True,
-          max_steps: int = 0, batch_size: int = 0, grad_accum: int = 0):
+          max_steps: int = 0, batch_size: int = 0, grad_accum: int = 0,
+          epochs: int = 0, lora_r: int = 0, lora_alpha: int = 0,
+          learning_rate: float = 0.0, run_tag: str = "", base_model: str = "",
+          full_ft: bool = False, data_subdir: str = ""):
     if target not in CONFIGS:
         raise SystemExit(f"--target は {list(CONFIGS)} のいずれか")
     cfg = CONFIGS[target]
+    # base_model 上書き（CPT 済みモデルを土台に「再SFT」する用。空で CONFIGS 既定）。
+    base = base_model or cfg["base_model"]
+    # data_subdir 上書き（急峻化ラベル sft_corpus_1_steep 等の差し替え用。空で CONFIGS 既定）。
+    subdir = data_subdir or cfg["data_subdir"]
 
     # バッチ等は CLI 上書き可（>0 で優先）。CONFIGS は baked なので再ビルド不要で調整するため。
     bs = batch_size or cfg["per_device_train_batch_size"]
     ga = grad_accum or cfg["gradient_accumulation_steps"]
+    # ハイパラ上書き（バリアント実験用。>0 / >0.0 で CONFIGS 既定に優先）。
+    n_epochs = epochs or cfg["num_train_epochs"]
+    r = lora_r or cfg["lora_r"]
+    alpha = lora_alpha or cfg["lora_alpha"]
+    # full-FT は全パラ更新で LoRA より発散しやすい → 既定 LR を下げる（CONFIGS は LoRA 調整値）。
+    # 例: buzz(LFM2.5-350M)は LoRA だと attn のみ 0.28% しか乗らず容量不足 → full-FT が素直。
+    default_lr = (3e-5 if full_ft else cfg["learning_rate"])
+    lr = learning_rate or default_lr
 
     # push 指定時は訓練前に write トークンを fail-fast 検証（2h訓練後の push 失敗を防ぐ）
     if push_to_hub:
@@ -168,36 +183,54 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
 
     set_seed(seed)
 
-    out_dir = os.path.join(out_root, f"{target}_sft")
-    print(f"[sft] target={target} base={cfg['base_model']} out={out_dir}")
+    # run_tag を付けると別ディレクトリ/別リポジトリに保存（ベースラインを上書きしない）
+    out_dir = os.path.join(out_root, f"{target}_sft{('_' + run_tag) if run_tag else ''}")
+    print(f"[sft] target={target} base={base} out={out_dir}  mode={'full-FT' if full_ft else 'LoRA'}")
+    if full_ft:
+        print(f"[sft] hparams: FULL-param FT  epochs={n_epochs} lr={lr}"
+              + (f"  run_tag={run_tag}" if run_tag else ""))
+    else:
+        print(f"[sft] hparams: LoRA  epochs={n_epochs} lora_r={r} lora_alpha={alpha} lr={lr}"
+              + (f"  run_tag={run_tag}" if run_tag else ""))
 
     # --- モデル & トークナイザ ---
-    model, tokenizer = FastModel.from_pretrained(
-        model_name=cfg["base_model"],
-        max_seq_length=cfg["max_seq_length"],
-        load_in_4bit=cfg["load_in_4bit"],
-        dtype=None,  # 自動（bf16 if supported）
-    )
-
-    # Base モデルに chatml テンプレートを後付け（推論側と一致させること）
-    tokenizer = get_chat_template(tokenizer, chat_template="chatml")
-
-    model = FastModel.get_peft_model(
-        model,
-        r=cfg["lora_r"],
-        lora_alpha=cfg["lora_alpha"],
-        lora_dropout=cfg["lora_dropout"],
-        target_modules=TARGET_MODULES,
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=seed,
-    )
+    if full_ft:
+        # 全パラ FT（LFM2.5-350M のように小さく LoRA 被覆が薄いモデル向け。get_peft_model を呼ばない）。
+        # grad ckpt は from_pretrained に渡す（cpt.py と同じ・deepwiki 確認の経路）。
+        model, tokenizer = FastModel.from_pretrained(
+            model_name=base,
+            max_seq_length=cfg["max_seq_length"],
+            load_in_4bit=False,
+            full_finetuning=True,
+            use_gradient_checkpointing="unsloth",
+            dtype=None,
+        )
+        tokenizer = get_chat_template(tokenizer, chat_template="chatml")
+    else:
+        model, tokenizer = FastModel.from_pretrained(
+            model_name=base,
+            max_seq_length=cfg["max_seq_length"],
+            load_in_4bit=cfg["load_in_4bit"],
+            dtype=None,  # 自動（bf16 if supported）
+        )
+        # Base モデルに chatml テンプレートを後付け（推論側と一致させること）
+        tokenizer = get_chat_template(tokenizer, chat_template="chatml")
+        model = FastModel.get_peft_model(
+            model,
+            r=r,
+            lora_alpha=alpha,
+            lora_dropout=cfg["lora_dropout"],
+            target_modules=TARGET_MODULES,
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=seed,
+        )
 
     # --- データ ---
-    train_ds = build_dataset(tokenizer, data_root, cfg["data_subdir"], "train")
-    val_ds = build_dataset(tokenizer, data_root, cfg["data_subdir"], "val")
+    train_ds = build_dataset(tokenizer, data_root, subdir, "train")
+    val_ds = build_dataset(tokenizer, data_root, subdir, "val")
     if train_ds is None:
-        raise SystemExit(f"train.jsonl が見つからない: {data_root}/{cfg['data_subdir']}")
+        raise SystemExit(f"train.jsonl が見つからない: {data_root}/{subdir}")
     print(f"[sft] train={len(train_ds)}  val={len(val_ds) if val_ds else 0}  "
           f"per_device_bs={bs} grad_accum={ga} effective_bs={bs * ga}")
 
@@ -212,8 +245,8 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
         per_device_train_batch_size=bs,
         gradient_accumulation_steps=ga,
         max_steps=max_steps if smoke else -1,
-        num_train_epochs=cfg["num_train_epochs"],
-        learning_rate=cfg["learning_rate"],
+        num_train_epochs=n_epochs,
+        learning_rate=lr,
         warmup_ratio=cfg["warmup_ratio"],
         lr_scheduler_type="cosine",
         optim="adamw_8bit",
@@ -261,26 +294,30 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
     print(f"[sft] throughput: {m.get('train_samples_per_second')} samples/s  "
           f"runtime={m.get('train_runtime')}s  train_loss={m.get('train_loss')}")
 
-    # LoRA アダプタを保存（推論はアダプタ or マージ済みのどちらでも可）
+    # 保存（full-FT=全重み / LoRA=アダプタ）
     model.save_pretrained(out_dir)
     tokenizer.save_pretrained(out_dir)
-    print(f"[sft] saved LoRA adapter -> {out_dir}")
+    print(f"[sft] saved {'full model' if full_ft else 'LoRA adapter'} -> {out_dir}")
 
     if push_to_hub:
         # ⚠ ライセンス: コーパス由来の重み。既定 Private（quiz-ai.md 帰属表記を参照）。
-        # アダプタのみ {repo}-lora / マージ済み16bit {repo}-merged の2種を上げる。
         token = os.environ.get("HF_TOKEN")  # Modal Secret 'huggingface' から注入
-        lora_repo = f"{push_to_hub}-lora"
-        merged_repo = f"{push_to_hub}-merged"
+        merged_repo = f"{push_to_hub}-merged"   # 推論/再利用の土台（full-FT/LoRA とも -merged 名で統一）
 
-        model.push_to_hub(lora_repo, token=token, private=hub_private)
-        tokenizer.push_to_hub(lora_repo, token=token, private=hub_private)
-        print(f"[sft] pushed adapter ({'private' if hub_private else 'public'}) -> {lora_repo}")
-
-        # マージ済み（16bit）。QLoRA(4bit)ベースは dequant してから LoRA をマージ。
-        model.push_to_hub_merged(merged_repo, tokenizer, save_method="merged_16bit",
-                                 token=token, private=hub_private)
-        print(f"[sft] pushed merged 16bit ({'private' if hub_private else 'public'}) -> {merged_repo}")
+        if full_ft:
+            # 非PEFT: native push（push_to_hub_merged は PEFT 専用で警告/エラー／cpt.py と同方針）。
+            model.push_to_hub(merged_repo, token=token, private=hub_private)
+            tokenizer.push_to_hub(merged_repo, token=token, private=hub_private)
+            print(f"[sft] pushed full 16bit model ({'private' if hub_private else 'public'}) -> {merged_repo}")
+        else:
+            lora_repo = f"{push_to_hub}-lora"
+            model.push_to_hub(lora_repo, token=token, private=hub_private)
+            tokenizer.push_to_hub(lora_repo, token=token, private=hub_private)
+            print(f"[sft] pushed adapter ({'private' if hub_private else 'public'}) -> {lora_repo}")
+            # マージ済み（16bit）。QLoRA(4bit)ベースは dequant してから LoRA をマージ。
+            model.push_to_hub_merged(merged_repo, tokenizer, save_method="merged_16bit",
+                                     token=token, private=hub_private)
+            print(f"[sft] pushed merged 16bit ({'private' if hub_private else 'public'}) -> {merged_repo}")
 
 
 def main():
@@ -300,10 +337,29 @@ def main():
                     help="per_device バッチ上書き（0でCONFIGS既定）")
     ap.add_argument("--grad-accum", type=int, default=0,
                     help="勾配累積上書き（0でCONFIGS既定）")
+    ap.add_argument("--epochs", type=int, default=0,
+                    help="エポック数上書き（0でCONFIGS既定）")
+    ap.add_argument("--lora-r", type=int, default=0,
+                    help="LoRA rank 上書き（0でCONFIGS既定）")
+    ap.add_argument("--lora-alpha", type=int, default=0,
+                    help="LoRA alpha 上書き（0でCONFIGS既定）")
+    ap.add_argument("--learning-rate", type=float, default=0.0,
+                    help="学習率上書き（0.0でCONFIGS既定）")
+    ap.add_argument("--run-tag", default="",
+                    help="出力ディレクトリ/リポジトリのサフィックス（ベースライン非破壊）")
+    ap.add_argument("--base-model", default="",
+                    help="土台モデル上書き（CPT済みモデルで再SFTする用。空でCONFIGS既定）")
+    ap.add_argument("--full-ft", action="store_true",
+                    help="全パラFT（LoRA不使用）。350MのようにLoRA被覆が薄いモデル向け。既定LR=3e-5")
+    ap.add_argument("--data-subdir", default="",
+                    help="コーパスのサブディレクトリ上書き（例 sft_corpus_1_steep）。空でCONFIGS既定")
     a = ap.parse_args()
     train(a.target, os.path.expanduser(a.data_root), os.path.expanduser(a.out_root),
           seed=a.seed, push_to_hub=a.push_to_hub, hub_private=not a.public,
-          max_steps=a.max_steps, batch_size=a.batch_size, grad_accum=a.grad_accum)
+          max_steps=a.max_steps, batch_size=a.batch_size, grad_accum=a.grad_accum,
+          epochs=a.epochs, lora_r=a.lora_r, lora_alpha=a.lora_alpha,
+          learning_rate=a.learning_rate, run_tag=a.run_tag, base_model=a.base_model,
+          full_ft=a.full_ft, data_subdir=a.data_subdir)
 
 
 if __name__ == "__main__":

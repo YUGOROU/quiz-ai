@@ -77,3 +77,52 @@ python train/sft.py --target main --data-root ~/quiz-ai-corpus/corpus --out-root
 
 - 割り込み: val prefix で confidence を出し、閾値交差位置と buzz_char の **MAE** を測る。
 - メイン: corpus-2 val(`variant=exact`) で `<think>` 打ち切り後の answer 正解率（`src/qutils.is_correct` 流用）。
+  - 実装は `train/modal_infer.py`（`--source val|full|base|paired`）。
+
+## CPT（継続事前学習）— メインLLM の知識天井対策
+
+**動機（docs/HANDOFF.md）**: メインLLM の全文正解率は **48% が 9B の知識ハード上限**。
+ハイパラ/SFTデータ増量/elicitation のいずれでも動かないとペア評価で実証決着 →
+parametric 知識を上げる **CPT が唯一のレバー**。日本語 wiki で CPT し、**CPT→再SFT→全文eval**
+で 48% が動くかを検証する。RAG・27B は却下、gemma-4-12B は Unsloth 未対応で土台は Qwen3.5-9B-Base に据置。
+
+**コーパス**: `range3/wiki40b-ja`（wiki40b＝Google 品質フィルタ版の日本語抽出・CC-BY-SA・「幅広いが小さい」）。
+全量 ~0.9–1.5B tok 規模なので **token-budget でサブサンプル**（既定 100M tok）して run 時間/コストを制御。
+
+**手法 = full-param FT-CPT（確定 2026-06-05）**: LoRA の低ランク容量限界は知識注入に不利なため、
+Modalクレジット$250 獲得（無料枠/コスト制約が消えた）を受けて**全パラメータ FT** を選択（`--full-ft`）。
+H100 80GB で `Trainable 9.41B/9.41B (100%)`・bf16 full FT（メモリ50%減）・peak 60.5/79GiB(bs=2)。
+GPU=**H100**（本ワークロードは248K語彙lm_headで帯域律速＝帯域最大GPUが最速 / tok/$ 微最適化は不要に）。
+
+**SFT との違い**（`train/cpt.py`）: 素の CLM（chatml なし・response-only マスクなし）／full FT は
+`embed_tokens`/`lm_head` も自動で学習対象／`embedding_learning_rate` を本体 LR の 1/10（5e-5 / 5e-6）。
+QLoRA 経路（`--full-ft` 無し）も残置（r=128＋embed/lm_head、低コスト比較用）。
+
+⚠ **packing は事前パッキングで対処**（`build_cpt_corpus.py` の `--pack-seq 2048`）。Qwen3.5 は VLM(processor系)で
+Unsloth の sample packing が無効化される（`Sample packing skipped`）→ コーパス側で token粒度に 2048tok ブロックへ
+連結し padding 浪費を消す。各行が再tokenizeで 2040–2048tok の密系列になる（検証済）。
+
+```bash
+# 1) コーパス整形（Modal CPU ジョブが Volume /cpt_corpus へ直接生成・packing込み。ローカルDL/put不要）
+#    初回 full-FT 信号run は 50M tok。step時間はサイズ非依存なので疎通は同コーパスの先頭10stepで足る。
+uv run --with modal modal run train/modal_cpt.py::prep --token-budget 50_000_000 --pack-seq 2048
+#    ローカルで整形したい場合: uv run src/build_cpt_corpus.py --out-dir ~/quiz-ai-corpus/corpus
+#      → uv run --with modal modal volume put quiz-corpus .../cpt_corpus /cpt_corpus
+
+# 2) full-FT-CPT（まず疎通で step 時間/メモリ較正 → 12h timeout に収まるか確認）
+#    entrypoint が prep/main の2つあるので ::main を明示
+uv run --with modal modal run train/modal_cpt.py::main --full-ft --max-steps 10 --batch-size 2
+uv run --with modal modal run train/modal_cpt.py::main --full-ft --push-to-hub YUGOROU/quiz-qwen-cpt
+#   → YUGOROU/quiz-qwen-cpt-merged（bf16 全重み）が再SFT の土台になる
+
+# 3) 再SFT（CPT 済みモデルを base に corpus-2 を再 SFT）
+uv run --with modal modal run train/modal_sft.py --target main --run-tag cpt \
+  --base-model YUGOROU/quiz-qwen-cpt-merged --push-to-hub YUGOROU/quiz-main-sft-cpt
+
+# 4) 全文eval で 48% が動いたか確認
+uv run --with modal modal run train/modal_infer.py --source full \
+  --repo YUGOROU/quiz-main-sft-cpt --n 200 --gpu A100-40GB
+```
+
+⚠ full-FT は固定コスト（weights+grads+adam8bit）≈54GB＋活性。bs はメモリ実測で決める（bs=2 で 76%）。
+12h timeout を超えそうなら token-budget を落とすか checkpoint-resume（`--max-steps` 無しで save_strategy=epoch）。

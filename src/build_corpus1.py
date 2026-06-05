@@ -35,15 +35,19 @@ PRICE = (0.12, 0.21)  # deepseek-v4-flash $/1M（in, out）。キャッシュは
 
 
 def sample_positions(buzz_char: int, L: int) -> list[int]:
-    """区分A（密）/ B（前半・疎）/ C（後半・疎）から最大16件をサンプリング。"""
+    """区分A（buzz周辺・密）/ B（前半・疎）/ C（後半・疎）から ~6件をサンプリング。
+
+    コスト最適化（2026-06-03）: 1問あたり最大16→~6プレフィックスへ削減し
+    corpus-1 の総コール数を約半減。学習価値の高い buzz 周辺（区分A）を優先して残し、
+    情報量の低い前半・後半の疎サンプルは各1件に絞る。
+    """
     pos: set[int] = set()
-    # 区分A: buzz_char ± 10 を 2文字刻み（最大10件）
-    a = list(range(buzz_char - BUZZ_REGION, buzz_char + BUZZ_REGION + 1, 2))
-    pos.update(a[:10] if len(a) > 10 else a)
-    # 区分B: 前半・疎
-    pos.update([10, int(buzz_char * 0.33), int(buzz_char * 0.66)])
-    # 区分C: 後半・疎
-    pos.update([int(buzz_char * 1.2), int(buzz_char * 1.5), L])
+    # 区分A: buzz_char ± 6 を 3文字刻み（buzz-6,-3,0,+3,+6 の最大5件＝確信遷移を捉える）
+    pos.update(range(buzz_char - 6, buzz_char + 7, 3))
+    # 区分B: 前半・疎（1件）
+    pos.add(int(buzz_char * 0.45))
+    # 区分C: 後半・疎（全文＝確信アンカー1件）
+    pos.add(L)
     # クリップ・範囲外除去
     return sorted(p for p in pos if 1 <= p <= L)
 
@@ -63,9 +67,9 @@ def gen_think(client, model, prefix: str, n: int, answer: str,
     prompt = (
         f"早押しクイズの問題文プレフィックス（{n}文字目まで）と正解を渡します。\n"
         f"プレフィックス: {prefix}\n正解: {answer}\n"
-        f"このプレフィックスから答えを推定する思考過程を1〜2文で。解答候補と根拠のみ。"
+        f"このプレフィックスから答えを推定する思考過程を1文で簡潔に。解答候補と根拠のみ。"
     )
-    out = U.chat(client, model, prompt, max_tokens=96, temperature=0.7,
+    out = U.chat(client, model, prompt, max_tokens=40, temperature=0.7,
                  reasoning_effort=reasoning_effort, meter=meter)
     return (out or "").replace("\n", " ").strip()
 
@@ -126,6 +130,7 @@ def main() -> None:
     print(f"[plan] {len(questions):,} 問 → {len(jobs):,} prefix / 既処理 {len(done):,} / 今回 {len(todo):,}")
 
     writer = U.JsonlWriter(cache_path)
+    depleted = False
     try:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
             futs = {ex.submit(build_item, client, model, q, n, reasoning_effort, meter): (q, n)
@@ -134,12 +139,34 @@ def main() -> None:
                 q, n = futs[fut]
                 try:
                     item = fut.result()
+                    # 空<think>は設計違反（corpus.md: 1〜2文の短い独白必須）かつ throttling 由来の
+                    # 壊れデータ。cache に書かず未処理のまま残し、次回再開で再試行させる。
+                    content = item["messages"][1]["content"]
+                    think = content.split("</think>")[0].replace("<think>", "").strip()
+                    if not think:
+                        continue
                     item["key"] = f"{q['qid']}:{n}"
                     writer.write(item)
+                except U.CreditDepletedError as e:
+                    # 与信枯渇（402）: 再試行で回復しないので即停止。未投入分は cancel し、
+                    # cache は逐次 flush 済みなので損失なし（次回 HF 復活後に同コマンドで再開）。
+                    depleted = True
+                    print(f"\n[STOP] 402 与信枯渇を検知 → 合成を停止: {e}")
+                    for f in futs:
+                        f.cancel()
+                    break
                 except Exception:  # noqa: BLE001
                     pass
     finally:
         writer.close()
+
+    if depleted:
+        # 進捗だけ報告し、split 再生成はスキップ（部分上書きを避ける）。
+        n_cache = sum(1 for _ in U.read_jsonl(cache_path))
+        print(f"[usage] {meter.summary()}")
+        print(f"[depleted] cache 有効 {n_cache:,} 件で停止。HF クレジット復活後に同じ"
+              " コマンドで再開（cache から自動レジューム）。split は完走後に生成する。")
+        return
 
     # 価格は provider 依存（$/1M, in/out）。Crof.ai と Novita(HF経由)で異なる。
     ml = model.lower()

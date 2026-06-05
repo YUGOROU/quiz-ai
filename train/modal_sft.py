@@ -68,7 +68,10 @@ secrets = [modal.Secret.from_name("huggingface")]
     secrets=secrets,
 )
 def run(target: str, push_to_hub: str | None = None, hub_private: bool = True,
-        max_steps: int = 0, batch_size: int = 0, grad_accum: int = 0):
+        max_steps: int = 0, batch_size: int = 0, grad_accum: int = 0,
+        epochs: int = 0, lora_r: int = 0, lora_alpha: int = 0,
+        learning_rate: float = 0.0, run_tag: str = "", base_model: str = "",
+        full_ft: bool = False, data_subdir: str = ""):
     import sys
     sys.path.insert(0, SRC_DIR)  # add_local_dir で bake した /opt/quizsft
     import sft  # コア訓練ロジック（sft.py）
@@ -83,6 +86,14 @@ def run(target: str, push_to_hub: str | None = None, hub_private: bool = True,
         max_steps=max_steps,
         batch_size=batch_size,
         grad_accum=grad_accum,
+        epochs=epochs,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        learning_rate=learning_rate,
+        run_tag=run_tag,
+        base_model=base_model,
+        full_ft=full_ft,
+        data_subdir=data_subdir,
     )
     corpus_vol.commit()  # 出力を永続化
     hf_cache.commit()    # DLしたモデル重みを永続化（次回 run で再DLしない）
@@ -90,10 +101,35 @@ def run(target: str, push_to_hub: str | None = None, hub_private: bool = True,
 
 @app.local_entrypoint()
 def main(target: str = "main", push_to_hub: str = "", public: bool = False,
-         max_steps: int = 0, batch_size: int = 0, grad_accum: int = 0):
+         max_steps: int = 0, batch_size: int = 0, grad_accum: int = 0,
+         epochs: int = 0, lora_r: int = 0, lora_alpha: int = 0,
+         learning_rate: float = 0.0, run_tag: str = "", base_model: str = "",
+         gpu: str = "", full_ft: bool = False, data_subdir: str = "",
+         spawn: bool = False):
     # 疎通(バッチ較正): modal run train/modal_sft.py --target main --max-steps 10 --batch-size 32
     # 本番+HF push : modal run train/modal_sft.py --target main \
     #                  --push-to-hub YUGOROU/quiz-main-sft --batch-size 32
     #   → YUGOROU/quiz-main-sft-lora（アダプタ）と -merged（16bit）を private で上げる
-    run.remote(target=target, push_to_hub=(push_to_hub or None), hub_private=not public,
-               max_steps=max_steps, batch_size=batch_size, grad_accum=grad_accum)
+    # バリアント例(4epoch/rank64/LR5e-5): modal run train/modal_sft.py --target main \
+    #   --push-to-hub YUGOROU/quiz-main-sft-v2 --run-tag v2 \
+    #   --epochs 4 --lora-r 64 --lora-alpha 64 --learning-rate 5e-5
+    # CPT 再SFT例: modal run train/modal_sft.py --target main --run-tag cpt \
+    #   --base-model YUGOROU/quiz-qwen-cpt-merged --push-to-hub YUGOROU/quiz-main-sft-cpt
+    # 割り込み(350M)を右サイズGPUで: modal run train/modal_sft.py --target buzz \
+    #   --gpu A10G --push-to-hub YUGOROU/quiz-buzz-sft
+    #   ⚠ 350Mは小さくA100を飽和できない→A10G/L4で高利用率・十分速い（A100はアイドル過多）。
+    # --gpu でデフォルト A100-40GB を呼び出し時オーバーライド（Function.with_options）。
+    # --spawn で .spawn()＝真のサーバー側 fire-and-forget（ローカル切断で消えない。長時間run/
+    #   外出時はこちら。.remote()は detached でも切断時キャンセルされ得る＝Modal警告メール）。
+    fn = run.with_options(gpu=gpu) if gpu else run
+    kw = dict(target=target, push_to_hub=(push_to_hub or None), hub_private=not public,
+              max_steps=max_steps, batch_size=batch_size, grad_accum=grad_accum,
+              epochs=epochs, lora_r=lora_r, lora_alpha=lora_alpha,
+              learning_rate=learning_rate, run_tag=run_tag, base_model=base_model,
+              full_ft=full_ft, data_subdir=data_subdir)
+    if spawn:
+        call = fn.spawn(**kw)
+        print(f"[spawn] サーバー側で実行開始（Mac切断耐性）。call_id={call.object_id}")
+        print("  進捗: modal app logs <app-id>（modal app list で確認）。HFに push されたら完了。")
+    else:
+        fn.remote(**kw)
