@@ -70,7 +70,16 @@ class MainLLM:
         hf = os.environ.get("HF_TOKEN")
         crof = os.environ.get("CROFAI_API_KEY")
         override = os.environ.get("P0_MAIN_MODEL")
-        if hf:
+        # Phase 0b: Vast の vLLM serve（OpenAI互換）を最優先で使う。
+        # 例: P0_MAIN_BASE_URL=http://127.0.0.1:8000/v1  P0_MAIN_MODEL=quiz-main
+        base_url = os.environ.get("P0_MAIN_BASE_URL")
+        if base_url:
+            key = os.environ.get("P0_MAIN_API_KEY", "EMPTY")  # vLLM は任意キー可
+            self.client = AsyncOpenAI(base_url=base_url, api_key=key)
+            self.model = model or override or "quiz-main"
+            # 自前serveの gemma は reasoning チャンネルを持たない → reasoning_effort は送らない
+            self.extra_body.pop("reasoning_effort", None)
+        elif hf:
             self.client = AsyncOpenAI(base_url="https://router.huggingface.co/v1", api_key=hf)
             self.model = model or override or "openai/gpt-oss-120b:cerebras"
         elif crof:
