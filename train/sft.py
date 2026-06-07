@@ -28,6 +28,11 @@ import os
 INSTRUCTION_PART = "<|im_start|>user\n"
 RESPONSE_PART = "<|im_start|>assistant\n"
 
+# gemma-4 マーカー（gemma-4 / gemma-4-thinking テンプレ共通。Unsloth公式gemma-4ガイド）。
+# train_on_responses_only でこの response_part 以降のみ損失を取る。
+GEMMA4_INSTRUCTION_PART = "<|turn>user\n"
+GEMMA4_RESPONSE_PART = "<|turn>model\n"
+
 # --- 設定プリセット -------------------------------------------------------
 # LoRA rank/alpha は CLAUDE.md で未決のため、まずは堅実な既定値。
 # buzz は 350M と小さく回帰的タスクなので軽量、main は 9B 知識タスクなので少し厚め。
@@ -62,6 +67,27 @@ CONFIGS = {
         # bs=64 で推定 ~23GiB(≈58%) と安全マージンを残しつつGPU飽和度を改善。実効batch=64。
         per_device_train_batch_size=64,
         gradient_accumulation_steps=1,
+        warmup_ratio=0.03,
+    ),
+    # メインLLM(新本命): gemma-4-26B-A4B(MoE)。全文QA 84%(Qwen3.5-9B 51%を圧倒・
+    # メモリ model-knowledge-ceiling-gemma4-wins)。MoE は bnb 4bit QLoRA 不可 → Unsloth
+    # bf16 LoRA(load_in_16bit)。chat_template は gemma-4-thinking(我々の<think>と整合)。
+    # 要 A100-80GB(bf16 26B 常駐~52GB)。bs は疎通で較正。
+    "main_gemma": dict(
+        base_model="google/gemma-4-26B-A4B",
+        data_subdir="sft_corpus_2",
+        max_seq_length=2048,
+        load_in_4bit=False,
+        load_in_16bit=True,          # MoE: bf16 LoRA（4bitはBitsandBytesがMoE未対応）
+        chat_template="gemma-4-thinking",
+        moe=True,                    # get_peft_model を finetune_* フラグ経路に
+        lora_r=16,
+        lora_alpha=16,
+        lora_dropout=0.0,
+        learning_rate=2e-4,
+        num_train_epochs=2,
+        per_device_train_batch_size=2,   # 疎通で較正（80GBに収める）
+        gradient_accumulation_steps=8,   # 実効16
         warmup_ratio=0.03,
     ),
 }
@@ -207,24 +233,46 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
         )
         tokenizer = get_chat_template(tokenizer, chat_template="chatml")
     else:
+        # MoE(gemma-4 等)は bnb 4bit 不可 → load_in_16bit で bf16 LoRA。
+        load_16 = cfg.get("load_in_16bit", False)
         model, tokenizer = FastModel.from_pretrained(
             model_name=base,
             max_seq_length=cfg["max_seq_length"],
-            load_in_4bit=cfg["load_in_4bit"],
+            load_in_4bit=False if load_16 else cfg["load_in_4bit"],
+            load_in_16bit=load_16,
             dtype=None,  # 自動（bf16 if supported）
         )
-        # Base モデルに chatml テンプレートを後付け（推論側と一致させること）
-        tokenizer = get_chat_template(tokenizer, chat_template="chatml")
-        model = FastModel.get_peft_model(
-            model,
-            r=r,
-            lora_alpha=alpha,
-            lora_dropout=cfg["lora_dropout"],
-            target_modules=TARGET_MODULES,
-            bias="none",
-            use_gradient_checkpointing="unsloth",
-            random_state=seed,
-        )
+        # Base モデルにテンプレートを後付け（推論側と一致させること）。
+        # gemma-4 は gemma-4-thinking、それ以外(Qwen等 Base)は chatml。
+        chat_tmpl = cfg.get("chat_template", "chatml")
+        tokenizer = get_chat_template(tokenizer, chat_template=chat_tmpl)
+        if cfg.get("moe"):
+            # MoE: finetune_* フラグ経路（expert の gate_up/down も LoRA 対象化）。
+            # target_modules を明示すると expert 名のズレで漏れるため flags を使う。
+            model = FastModel.get_peft_model(
+                model,
+                finetune_vision_layers=False,   # text only
+                finetune_language_layers=True,
+                finetune_attention_modules=True,
+                finetune_mlp_modules=True,      # MoE expert を含む
+                r=r,
+                lora_alpha=alpha,
+                lora_dropout=cfg["lora_dropout"],
+                bias="none",
+                use_gradient_checkpointing="unsloth",
+                random_state=seed,
+            )
+        else:
+            model = FastModel.get_peft_model(
+                model,
+                r=r,
+                lora_alpha=alpha,
+                lora_dropout=cfg["lora_dropout"],
+                target_modules=TARGET_MODULES,
+                bias="none",
+                use_gradient_checkpointing="unsloth",
+                random_state=seed,
+            )
 
     # --- データ ---
     train_ds = build_dataset(tokenizer, data_root, subdir, "train")
@@ -271,11 +319,13 @@ def train(target: str, data_root: str, out_root: str, seed: int = 3407,
         args=sft_cfg,
     )
 
-    # プロンプト部をマスクし、assistant 応答のみで損失を取る
+    # プロンプト部をマスクし、assistant 応答のみで損失を取る。
+    # マーカーは chat_template に合わせる（gemma-4 は <|turn>系、chatml は <|im_start|>系）。
+    is_gemma = cfg.get("chat_template", "chatml").startswith("gemma")
     trainer = train_on_responses_only(
         trainer,
-        instruction_part=INSTRUCTION_PART,
-        response_part=RESPONSE_PART,
+        instruction_part=GEMMA4_INSTRUCTION_PART if is_gemma else INSTRUCTION_PART,
+        response_part=GEMMA4_RESPONSE_PART if is_gemma else RESPONSE_PART,
     )
 
     import torch

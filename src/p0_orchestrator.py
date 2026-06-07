@@ -73,7 +73,12 @@ async def run_episode(
     golds: list[str],
     cfg: EpisodeConfig,
     is_correct_fn: Callable[[str, list[str]], bool],
+    buzz_decider: Callable[[int, str], bool] | None = None,
 ) -> EpisodeResult:
+    # buzz_decider(pos, prefix)->bool で buzz 判定を差し替え可能（None でルール65%）。
+    # Phase 0b: 実 buzz モデル（回帰ヘッド conf ≥ θ_dynamic）を注入する継ぎ目。
+    # 今日の θトレードオフ実測（buzz_char+4〜8字で main 69〜74%）より、実効打点は
+    # S-buzz よりやや遅らせる（θ を上げる）と精度が上がる＝メイン側ゲートをクリアできる。
     L = len(question)
     buzz_pos = max(1, int(L * cfg.buzz_ratio))
     spec_pos = max(1, buzz_pos - cfg.spec_lead)
@@ -104,8 +109,10 @@ async def run_episode(
                 n_cancel += 1
                 spec_task = asyncio.create_task(llm.answer(prefix))
 
-            # ── buzz確定 → コミット
-            if rule_buzz(pos, prefix, buzz_pos):
+            # ── buzz確定 → コミット（buzz_decider 注入時はそれを、無ければルール65%）
+            buzzed = (buzz_decider(pos, prefix) if buzz_decider is not None
+                      else rule_buzz(pos, prefix, buzz_pos))
+            if buzzed:
                 t_buzz = now()
                 if spec_task is None:
                     spec_task = asyncio.create_task(llm.answer(prefix))

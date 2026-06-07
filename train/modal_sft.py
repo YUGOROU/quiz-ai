@@ -31,11 +31,15 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .uv_pip_install(
         "unsloth",
+        "unsloth_zoo",   # faster-MoE（gemma-4 等の MoE LoRA 最適化）
         "trl>=0.12",
         "datasets",
         "huggingface_hub",
         "hf_transfer",
         "nvidia-ml-py",  # pynvml: GPU利用率%・メモリの周期サンプリング
+        "pillow",        # gemma-4 processor は PIL 必須（無いと load 時に落ちる）
+        "sentencepiece",
+        "protobuf",
     )
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",  # 並列高速DL
