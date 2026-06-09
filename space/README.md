@@ -6,7 +6,7 @@ colorTo: red
 sdk: gradio
 sdk_version: 6.17.3
 app_file: app.py
-pinned: false
+pinned: true
 license: other
 short_description: Head-to-head Japanese competitive buzz-quiz against an AI
 ---
