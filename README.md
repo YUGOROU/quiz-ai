@@ -11,6 +11,7 @@
   <a href="https://huggingface.co/YUGOROU/quiz-main-gemma-merged"><img alt="Main model" src="https://img.shields.io/badge/%F0%9F%A4%97%20Model-Answering%20(gemma--4--26B)-red"></a>
   <a href="https://huggingface.co/YUGOROU/quiz-buzz-reg-1.2bjp-merged"><img alt="Buzz model" src="https://img.shields.io/badge/%F0%9F%A4%97%20Model-Buzz%20(LFM2.5--1.2B)-blue"></a>
   <img alt="params" src="https://img.shields.io/badge/params-%E2%89%A4%2032B%20(27.2B)-green">
+  <a href="https://deepwiki.com/YUGOROU/quiz-ai"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
 # quiz-ai ⚡ — a Japanese competitive buzz-quiz LLM system
