@@ -20,6 +20,11 @@ equal conditions. Built for the **HF Build Small Hackathon** (total params ≤ 3
 > players race to **buzz in as early as they dare** — buzzing too early on the lead-in clue is a costly
 > false start. This project is **specialized for Japanese**; questions are in 日本語.
 
+## Links
+- 💻 **Source code (GitHub):** https://github.com/YUGOROU/quiz-ai
+- 🧠 **Answering model:** https://huggingface.co/YUGOROU/quiz-main-gemma-merged
+- 🔔 **Buzz-timing model:** https://huggingface.co/YUGOROU/quiz-buzz-reg-1.2bjp-merged
+
 ## How it works (two fine-tuned models, ≤ 32B total)
 
 | Role | Model | Job |
