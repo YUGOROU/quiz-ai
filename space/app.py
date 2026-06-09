@@ -45,6 +45,7 @@ MOCK = os.environ.get("QUIZ_MOCK", "0") == "1"
 DEFAULT_THETA = float(os.environ.get("QUIZ_THETA", "0.65"))  # 実績点（curatedで6/6だった運用点）
 N_QUESTIONS = int(os.environ.get("QUIZ_N", "6"))             # 1マッチの問題数
 LOAD_TTS = os.environ.get("QUIZ_TTS", "1") == "1"            # Irodori 読み上げ（QUIZ_TTS=0で無効）
+BATCH_MAIN = os.environ.get("QUIZ_BATCH_MAIN", "1") == "1"   # gemma 生成を全問1バッチ化（初回待ち短縮）
 TTS_REF = str(HERE / "announcer_ref.wav")                    # 参照音声（VoiceDesign アナウンサー声）
 TTS_STEPS = int(os.environ.get("QUIZ_TTS_STEPS", "64"))      # num_steps=64（ユーザー確認の音質点）
 STATIC = HERE / "static"
@@ -118,6 +119,7 @@ def _gpu_build(questions: list[dict], match: str, theta: float) -> dict:
         _MODELS = rb.load_models(MAIN_REPO, BUZZ_REPO, token=os.environ.get("HF_TOKEN"),
                                  device="cuda", load_4bit=LOAD_4BIT, load_tts=LOAD_TTS)
     return rb.build_round(questions, _MODELS, qutils=qutils, match=match, theta=theta,
+                          batch_main=BATCH_MAIN,
                           tts_ref=TTS_REF if LOAD_TTS else None, tts_steps=TTS_STEPS)
 
 

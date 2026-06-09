@@ -106,7 +106,7 @@ quiz-ai/
 - Only **model weights + training/inference code** are published, with attribution:
   > Quiz questions © abc/EQIDEN実行委員会 / 株式会社キュービック / クイズ法人カプリティオ. Non-commercial research use only. No dataset redistribution.
 - `space/irodori_tts/` is vendored from [Aratako/Irodori-TTS-500M-v3](https://huggingface.co/Aratako/Irodori-TTS-500M-v3) and retains its upstream license.
-- The answering model inherits the [Gemma Terms of Use](https://ai.google.dev/gemma/terms); the buzz model inherits the [LFM Open License](https://huggingface.co/LiquidAI/LFM2.5-1.2B).
+- The answering model is a fine-tune of Google **Gemma 4**, which is released under the [Apache License 2.0](https://ai.google.dev/gemma/apache_2.md.txt); the buzz model inherits the [LFM Open License](https://huggingface.co/LiquidAI/LFM2.5-1.2B).
 
 ## Acknowledgements
 

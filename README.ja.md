@@ -102,7 +102,7 @@ quiz-ai/
 - 公開するのは**モデル重み＋訓練/推論コードのみ**（帰属表記つき）:
   > Quiz questions © abc/EQIDEN実行委員会 / 株式会社キュービック / クイズ法人カプリティオ. Non-commercial research use only. No dataset redistribution.
 - `space/irodori_tts/` は [Aratako/Irodori-TTS-500M-v3](https://huggingface.co/Aratako/Irodori-TTS-500M-v3) を vendoring したもので、上流ライセンスに従う。
-- メインモデルは [Gemma 利用規約](https://ai.google.dev/gemma/terms)、buzzモデルは [LFM Open License](https://huggingface.co/LiquidAI/LFM2.5-1.2B) を継承する。
+- メインモデルは Google **Gemma 4** の fine-tune で、Gemma 4 は [Apache License 2.0](https://ai.google.dev/gemma/apache_2.md.txt) で公開されている。buzzモデルは [LFM Open License](https://huggingface.co/LiquidAI/LFM2.5-1.2B) を継承する。
 
 ## 謝辞
 
