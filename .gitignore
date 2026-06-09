@@ -11,6 +11,18 @@ annotation_cache.jsonl
 phase0*_report.json
 *.jsonl
 
+# デモ問題プール・問題文を含むデータ（公開不可。build_aio_pool.py + label_genres.py で再生成する）
+space/questions_*.json
+**/questions_*.json
+**/.genre_cache*
+*.bak
+
+# 音声リファレンス等のバイナリアセット（コードのみ公開する方針）
+*.wav
+
+# 検証用TTS Space（お役御免・非公開）
+tts_test_space/
+
 # 認証情報
 .env
 *.key

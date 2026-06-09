@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quiz Buzzer AI — Live (Japanese quiz)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,500&family=Schibsted+Grotesk:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  html,body{margin:0;height:100%;background:#0e0d0c;overflow:hidden;}
+  /* 1920×1080 ステージを任意ビューポートの中央に確実に収める（grid 中央寄せは
+     オーバーフロー時に効かない環境があるため translate(-50%,-50%)+scale で固定）。 */
+  #stage-fit{position:fixed;inset:0;overflow:hidden;background:#0e0d0c;}
+  #stage-scale{position:absolute;left:50%;top:50%;width:1920px;height:1080px;
+    transform-origin:center center;}
+  /* nav は問題文と被らないよう既定で隠し、マウス/タップ操作時に右下へ一時表示（動画プレーヤー式）。 */
+  .nav{position:fixed;z-index:60;bottom:18px;right:18px;
+    display:flex;gap:8px;align-items:center;background:rgba(20,19,17,.82);backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:7px 9px;
+    font:500 13px "Schibsted Grotesk",sans-serif;color:#e8e5dd;
+    opacity:0;pointer-events:none;transform:translateY(8px);transition:opacity .3s ease,transform .3s ease;}
+  .nav.show{opacity:1;pointer-events:auto;transform:translateY(0);}
+  .nav button{font:inherit;color:#e8e5dd;background:transparent;border:0;cursor:pointer;
+    padding:6px 12px;border-radius:999px;display:flex;align-items:center;gap:6px;}
+  .nav button:hover{background:rgba(255,255,255,.1);}
+  .nav .sep{width:1px;height:18px;background:rgba(255,255,255,.16);}
+  .nav .lbl{font-family:"DM Mono",monospace;font-size:11px;color:#9b978d;padding:0 6px;letter-spacing:.04em;}
+  /* ロード/開始オーバーレイ（実モデルで1マッチ precompute 中） */
+  #boot{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
+    background:radial-gradient(120% 80% at 50% 0%,#1a1a1f,#0c0c0f);color:#f3f1ea;
+    font-family:"Schibsted Grotesk",system-ui,sans-serif;}
+  #boot .card{text-align:center;max-width:680px;padding:0 28px;}
+  #boot h1{font-weight:800;font-size:30px;margin:0 0 6px;letter-spacing:.01em;}
+  #boot .sub{color:#a8a49a;font-size:15px;line-height:1.6;margin-bottom:22px;}
+  #boot .jp{font-family:"Noto Sans JP",sans-serif;}
+  /* 言語トグル */
+  .langtoggle{display:inline-flex;gap:0;border:1px solid rgba(255,255,255,.18);border-radius:999px;
+    overflow:hidden;margin-bottom:24px;font-family:"DM Mono",monospace;font-size:13px;}
+  .langtoggle button{background:transparent;color:#a8a49a;border:0;padding:7px 18px;cursor:pointer;}
+  .langtoggle button.on{background:#f3f1ea;color:#0c0c0f;font-weight:700;}
+  /* ジャンルピッカー */
+  #genre-wrap{margin:0 auto 26px;max-width:640px;}
+  #genre-head{font-family:"Noto Sans JP",sans-serif;font-size:13px;color:#8a877e;
+    letter-spacing:.06em;margin-bottom:12px;text-transform:none;}
+  #genre-grid{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;}
+  .gchip{font:600 13px "Noto Sans JP",sans-serif;color:#cfccc2;background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:8px 15px;cursor:pointer;
+    transition:all .12s;}
+  .gchip:hover{background:rgba(255,255,255,.12);}
+  .gchip.on{background:#2f6df0;border-color:#2f6df0;color:#fff;}
+  .gchip .cnt{opacity:.55;font-size:11px;margin-left:5px;font-family:"DM Mono",monospace;}
+  #boot button#start{font:700 16px "Schibsted Grotesk",sans-serif;color:#0c0c0f;background:#f3f1ea;
+    border:0;border-radius:999px;padding:14px 34px;cursor:pointer;}
+  #boot button#start:disabled{opacity:.5;cursor:default;}
+  #boot .status{margin-top:18px;font-family:"DM Mono",monospace;font-size:13px;color:#6d6a62;min-height:18px;}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid #6d6a62;border-top-color:#f3f1ea;
+    border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px;margin-right:8px;}
+  @keyframes sp{to{transform:rotate(360deg);}}
+  /* 3・2・1・Go! カウントダウン演出 */
+  #countdown{position:fixed;inset:0;z-index:90;display:none;place-items:center;
+    background:radial-gradient(120% 80% at 50% 50%,#16161b,#0a0a0d);}
+  #countdown .num{font-family:"Schibsted Grotesk",system-ui,sans-serif;font-weight:800;
+    color:#f3f1ea;font-variant-numeric:tabular-nums;line-height:1;}
+  #countdown .num.n{font-size:220px;}
+  #countdown .num.go{font-size:160px;color:#2f6df0;letter-spacing:.02em;}
+  @keyframes cdpop{0%{transform:scale(.4);opacity:0;}
+    25%{transform:scale(1);opacity:1;}80%{transform:scale(1);opacity:1;}
+    100%{transform:scale(1.25);opacity:0;}}
+  #countdown .pop{animation:cdpop .85s cubic-bezier(.2,.9,.3,1) both;}
+</style>
+</head>
+<body>
+<div id="stage-fit"><div id="stage-scale"><div id="root"></div></div></div>
+<div id="countdown"><div class="num" id="cd-num"></div></div>
+
+<div id="boot">
+  <div class="card">
+    <h1 id="boot-title">Quiz Buzzer AI</h1>
+    <div class="sub" id="boot-sub"></div>
+    <div class="langtoggle" id="langtoggle">
+      <button data-lang="ja">日本語</button>
+      <button data-lang="en">English</button>
+    </div>
+    <div id="genre-wrap">
+      <div id="genre-head"></div>
+      <div id="genre-grid"></div>
+    </div>
+    <button id="start">Start match</button>
+    <div class="status" id="status"></div>
+  </div>
+</div>
+
+<div class="nav" id="nav">
+  <span class="lbl" id="nav-lbl">Quiz Buzzer AI · Live</span>
+  <span class="sep"></span>
+  <button id="btn-replay">▶ Replay</button>
+  <span class="sep"></span>
+  <button id="btn-new">✦ New match</button>
+</div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
+
+<!-- i18n（プレーン script。babel スクリプトより前に window.T / window.__lang を用意） -->
+<script src="/static/i18n.js"></script>
+
+<!-- 効果音（Web Audio 合成・window.playResult を用意。babel スクリプトより前に） -->
+<script src="/static/sfx.js"></script>
+
+<script src="/static/bigscreen-style-en.js"></script>
+<script>
+  // inject CSS
+  const st = document.createElement("style");
+  st.textContent = window.BIGSCREEN_CSS;
+  document.head.appendChild(st);
+  function fitStage(){
+    const s = Math.min(window.innerWidth/1920, window.innerHeight/1080);
+    document.getElementById("stage-scale").style.transform =
+      "translate(-50%,-50%) scale("+s+")";
+  }
+  window.addEventListener("resize", fitStage); fitStage();
+</script>
+
+<!-- UI / engine / tweaks（CDN React + 面内 Babel） -->
+<script type="text/babel" src="/static/tweaks-panel.jsx"></script>
+<script type="text/babel" src="/static/bigscreen-ui-en.jsx"></script>
+<script type="text/babel" src="/static/bigscreen-engine-en.jsx"></script>
+<script type="text/babel" src="/static/bigscreen-tweaks-en.jsx"></script>
+
+<script>
+  // ── 状態 ──────────────────────────────────────────────
+  let rendered = false;
+  let selectedGenre = null;   // null = おまかせ（全ジャンル）
+
+  // ── boot 画面の文言を現在の言語で描画 ──────────────────
+  function applyBootLang(){
+    document.documentElement.lang = window.__lang;
+    document.getElementById("boot-title").textContent = T("boot.title");
+    document.getElementById("boot-sub").innerHTML = T("boot.sub");
+    document.getElementById("genre-head").textContent = T("boot.genreHead");
+    document.getElementById("start").textContent = T("boot.start");
+    document.getElementById("nav-lbl").textContent = T("boot.liveLabel");
+    document.getElementById("btn-replay").textContent = T("boot.replay");
+    document.getElementById("btn-new").textContent = T("boot.newMatch");
+    // 言語トグルの選択状態
+    document.querySelectorAll("#langtoggle button").forEach((b)=>{
+      b.classList.toggle("on", b.dataset.lang === window.__lang);
+    });
+    // ジャンルチップの「おまかせ」ラベルだけ言語依存
+    const allChip = document.querySelector('.gchip[data-genre=""]');
+    if(allChip) allChip.firstChild.textContent = T("boot.genreAll");
+  }
+
+  document.querySelectorAll("#langtoggle button").forEach((b)=>{
+    b.addEventListener("click", ()=>{ window.setLang(b.dataset.lang); applyBootLang(); });
+  });
+
+  // ── 得意ジャンル一覧を取得してチップを描画 ───────────────
+  async function loadGenres(){
+    const grid = document.getElementById("genre-grid");
+    grid.innerHTML = "";
+    // 先頭は常に「おまかせ」（全ジャンル）
+    const all = document.createElement("button");
+    all.className = "gchip on"; all.dataset.genre = "";
+    all.appendChild(document.createTextNode(T("boot.genreAll")));
+    all.addEventListener("click", ()=>selectGenre("", all));
+    grid.appendChild(all);
+    try{
+      const r = await fetch("/api/genres");
+      const data = await r.json();
+      (data.genres || []).forEach((g)=>{
+        const chip = document.createElement("button");
+        chip.className = "gchip"; chip.dataset.genre = g.genre;
+        chip.appendChild(document.createTextNode(g.genre));
+        const c = document.createElement("span"); c.className = "cnt"; c.textContent = g.count;
+        chip.appendChild(c);
+        chip.addEventListener("click", ()=>selectGenre(g.genre, chip));
+        grid.appendChild(chip);
+      });
+    }catch(e){ /* ラベル未付与なら おまかせ のみ */ }
+  }
+  function selectGenre(g, el){
+    selectedGenre = g || null;
+    document.querySelectorAll(".gchip").forEach((c)=>c.classList.remove("on"));
+    el.classList.add("on");
+  }
+
+  // ── 実モデルで1マッチ生成（QUIZ_ROUND） ──────────────────
+  async function fetchRound(){
+    const status = document.getElementById("status");
+    const startBtn = document.getElementById("start");
+    startBtn.disabled = true;
+    status.innerHTML = '<span class="spin"></span>' + T("boot.generating");
+    try{
+      const r = await fetch("/api/round", {method:"POST", headers:{"content-type":"application/json"},
+        body: JSON.stringify({genre: selectedGenre})});
+      if(!r.ok){ throw new Error("HTTP "+r.status+" "+(await r.text()).slice(0,160)); }
+      const data = await r.json();
+      if(data.error){ throw new Error(data.error); }
+      window.QUIZ_ROUND = data;
+      return true;
+    }catch(e){
+      status.innerHTML = "⚠ "+e.message;
+      startBtn.disabled = false;
+      return false;
+    }
+  }
+  // nav の自動表示制御（マウス/タップで一時表示→数秒で自動的に隠す）。問題文と恒常的に被らない。
+  let navActive = false;   // 対戦中だけ反応（boot 中は隠す）
+  let navTimer = null;
+  function revealNav(){
+    if(!navActive) return;
+    const nav = document.getElementById("nav");
+    nav.classList.add("show");
+    clearTimeout(navTimer);
+    navTimer = setTimeout(() => nav.classList.remove("show"), 2600);
+  }
+  window.addEventListener("mousemove", revealNav);
+  window.addEventListener("touchstart", revealNav, {passive:true});
+
+  function renderStage(){
+    document.getElementById("boot").style.display = "none";
+    navActive = true;   // 既定は非表示・マウス移動で右下に一時表示
+    if(!rendered){
+      // プレーン script なので JSX は使えない（SyntaxError でクリックリスナーごと死ぬ）。
+      // React.createElement で生成する。
+      ReactDOM.createRoot(document.getElementById("root")).render(
+        React.createElement(window.BigScreenApp));
+      rendered = true;
+    }else if(window.__replay){
+      window.__replay();
+    }
+  }
+  // 3・2・1・Go! の演出（各 ~0.85s）。Promise で完了を待ってから big-screen を描画。
+  function runCountdown(){
+    return new Promise((resolve) => {
+      const cd = document.getElementById("countdown");
+      const num = document.getElementById("cd-num");
+      const seq = [{t:"3",c:"n"},{t:"2",c:"n"},{t:"1",c:"n"},{t:"Go!",c:"go"}];
+      cd.style.display = "grid";
+      let i = 0;
+      const step = () => {
+        if(i >= seq.length){ cd.style.display = "none"; resolve(); return; }
+        const s = seq[i++];
+        num.className = "num " + s.c + " pop";
+        num.textContent = s.t;
+        void num.offsetWidth;  // reflow で animation を再起動
+        setTimeout(step, 720);
+      };
+      step();
+    });
+  }
+  document.getElementById("start").addEventListener("click", async () => {
+    if(await fetchRound()){ await runCountdown(); renderStage(); }
+  });
+  document.getElementById("btn-replay").addEventListener("click", () => window.__replay && window.__replay());
+  document.getElementById("btn-new").addEventListener("click", () => {
+    navActive = false;
+    const nav = document.getElementById("nav");
+    nav.classList.remove("show");
+    clearTimeout(navTimer);
+    document.getElementById("boot").style.display = "grid";
+    document.getElementById("status").textContent = "";
+    document.getElementById("start").disabled = false;
+  });
+
+  // 初期化
+  applyBootLang();
+  loadGenres();
+</script>
+</body>
+</html>

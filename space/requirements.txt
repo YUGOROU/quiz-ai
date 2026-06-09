@@ -1,0 +1,27 @@
+# HF Space（ZeroGPU + Gradio + FastAPI マウント）依存。
+# gemma-4-26B-A4B を transformers + trust_remote_code でロード（vLLM 不要・HANDOFF）。
+# gradio は huggingface_hub 1.x 対応版が必須（4.44 は HfFolder import で起動失敗）。
+gradio==6.17.3
+spaces
+fastapi
+uvicorn
+torch
+transformers
+accelerate
+huggingface_hub
+hf_transfer
+sentencepiece>=0.1.99,<0.2
+protobuf
+einops
+pillow
+tiktoken
+blobfile
+bitsandbytes
+# ── Irodori-TTS（問題読み上げ・vendoring した irodori_tts/ の依存。test Space で実績）──
+torchaudio
+soundfile
+numpy
+peft>=0.18.0
+torchcodec>=0.10.0
+dacvae @ git+https://github.com/facebookresearch/dacvae
+silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152
