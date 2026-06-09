@@ -24,10 +24,16 @@
 
 ## デモ
 
-<!-- docs/assets/screenshot-bigscreen.png を実機Spaceのスクショに差し替えてください。 -->
-<p align="center">
-  <img src="docs/assets/screenshot-bigscreen.png" alt="Big Screen UI — 人間 vs AI 早押し対戦" width="80%">
-</p>
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/screenshot-onboard-ja.png" alt="オンボーディング — 得意ジャンル選択・EN/JA切替"></td>
+<td width="50%"><img src="docs/assets/screenshot-game-ja.png" alt="Big Screen — AIが早押しし推論を表示"></td>
+</tr>
+<tr>
+<td align="center"><sub>得意ジャンルを選択・EN/JA バイリンガルUI</sub></td>
+<td align="center"><sub>AIが早押し（<b>AI 早押し</b>）し、推論をライブ表示</sub></td>
+</tr>
+</table>
 
 ▶️ **ライブデモ:** https://huggingface.co/spaces/build-small-hackathon/quiz-buzzer-ai
 

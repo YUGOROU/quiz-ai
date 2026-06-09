@@ -25,10 +25,16 @@ the **[HF Build Small Hackathon](https://huggingface.co/build-small-hackathon)**
 
 ## Demo
 
-<!-- Replace docs/assets/screenshot-bigscreen.png with a real capture of the running Space. -->
-<p align="center">
-  <img src="docs/assets/screenshot-bigscreen.png" alt="Big Screen UI — human vs AI buzz-quiz" width="80%">
-</p>
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/screenshot-onboard-en.png" alt="Onboarding — pick your strong genre, EN/JA toggle"></td>
+<td width="50%"><img src="docs/assets/screenshot-game-en.png" alt="Big Screen — the AI buzzes in and shows its reasoning"></td>
+</tr>
+<tr>
+<td align="center"><sub>Pick a strong genre · bilingual EN/JA UI</sub></td>
+<td align="center"><sub>The AI buzzes in (<b>AI BUZZ</b>) and shows live reasoning</sub></td>
+</tr>
+</table>
 
 ▶️ **Try it live:** https://huggingface.co/spaces/build-small-hackathon/quiz-buzzer-ai
 
