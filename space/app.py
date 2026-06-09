@@ -21,6 +21,8 @@ import json
 import os
 import pathlib
 import sys
+import threading
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 for cand in (HERE / "src", HERE.parent / "src"):
@@ -167,11 +169,22 @@ def api_genres():
     return {"genres": avail, "min_for_match": N_QUESTIONS}
 
 
+# ★ ZeroGPU は **並行する @spaces.GPU 呼び出しごとに別GPUを確保**する（マルチGPU仕様）。
+# 複数タブ/端末/観客が生成中（~36s）に同時に Start を押すと GPU を2個以上つかみ quota が
+# 倍速で溶ける。ここで single-flight 直列化し、常に1個だけ確保されるようにする
+# （2人目以降は GPU を要求する前にロック待ち＝順番に1個ずつ処理）。
+_BUILD_LOCK = threading.Lock()
+
+
 @app.post("/api/round")
 def api_round(payload: dict | None = None):
     payload = payload or {}
     try:
-        return JSONResponse(build_round_api(payload.get("genre"), payload.get("theta")))
+        with _BUILD_LOCK:                       # 直列化（同時に2個確保しない）
+            t0 = time.time()                    # 実ビルド秒（キュー待ちは含めない）
+            result = build_round_api(payload.get("genre"), payload.get("theta"))
+            result["_build_seconds"] = round(time.time() - t0, 1)  # frontend の ETA 自己較正用
+        return JSONResponse(result)
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()

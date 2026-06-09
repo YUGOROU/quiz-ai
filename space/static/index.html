@@ -57,6 +57,14 @@
   .spin{display:inline-block;width:14px;height:14px;border:2px solid #6d6a62;border-top-color:#f3f1ea;
     border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px;margin-right:8px;}
   @keyframes sp{to{transform:rotate(360deg);}}
+  /* 生成中プログレスバー（自己較正 ETA・tqdm 風に %／残り時間を表示） */
+  #prog{display:none;width:360px;max-width:82vw;margin:16px auto 0;}
+  #prog .bar{height:6px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden;}
+  #prog .fill{height:100%;width:0;border-radius:999px;
+    background:linear-gradient(90deg,#2f6df0,#7aa2ff);transition:width .2s linear;}
+  #prog .meta{display:flex;justify-content:space-between;align-items:baseline;margin-top:9px;
+    font-family:"DM Mono",monospace;font-size:12px;color:#8a877e;}
+  #prog .pct{color:#e8e5dd;font-weight:500;font-variant-numeric:tabular-nums;}
   /* 3・2・1・Go! カウントダウン演出 */
   #countdown{position:fixed;inset:0;z-index:90;display:none;place-items:center;
     background:radial-gradient(120% 80% at 50% 50%,#16161b,#0a0a0d);}
@@ -88,6 +96,10 @@
     </div>
     <button id="start">Start match</button>
     <div class="status" id="status"></div>
+    <div id="prog">
+      <div class="bar"><div class="fill" id="prog-fill"></div></div>
+      <div class="meta"><span id="prog-label"></span><span class="pct" id="prog-pct">0%</span></div>
+    </div>
   </div>
 </div>
 
@@ -187,21 +199,60 @@
     el.classList.add("on");
   }
 
-  // ── 実モデルで1マッチ生成（QUIZ_ROUND） ──────────────────
+  // 残り時間の文言（i18n 補間は使わず言語で分岐）
+  function etaText(remainSec){
+    if(remainSec <= 0) return T("boot.almost");
+    const s = Math.ceil(remainSec);
+    return (window.__lang === "en") ? ("~" + s + "s remaining") : ("残り 約 " + s + " 秒");
+  }
+  // ── 実モデルで1マッチ生成（QUIZ_ROUND）。tqdm 風に %／残り時間を表示 ──────────
   async function fetchRound(){
     const status = document.getElementById("status");
     const startBtn = document.getElementById("start");
+    const prog = document.getElementById("prog");
+    const fill = document.getElementById("prog-fill");
+    const pct = document.getElementById("prog-pct");
+    const plabel = document.getElementById("prog-label");
     startBtn.disabled = true;
     status.innerHTML = '<span class="spin"></span>' + T("boot.generating");
+
+    // 自己較正 ETA: 前回の実測ビルド秒（_build_seconds）を localStorage に保持。
+    // 初回は実測値どおり 36s を既定に。6〜90s にクランプ（外れ値で予測が壊れないよう）。
+    let eta = 36;
+    try{ const v = parseFloat(localStorage.getItem("qa_build_sec"));
+      if(v > 0) eta = Math.min(90, Math.max(6, v)); }catch(e){}
+    prog.style.display = "block";
+    fill.style.width = "0%"; pct.textContent = "0%"; plabel.textContent = etaText(eta);
+    const t0 = performance.now();
+    const timer = setInterval(() => {
+      const el = (performance.now() - t0) / 1000;
+      // ETA までは 0→95% を線形、超過後は 99% へ漸近（実測が予測より遅くても張り付かせない）。
+      let frac = (el < eta) ? (el / eta) * 0.95
+                            : 0.95 + 0.04 * (1 - Math.exp(-(el - eta) / 8));
+      frac = Math.min(0.99, frac);
+      const p = Math.round(frac * 100);
+      fill.style.width = p + "%"; pct.textContent = p + "%";
+      plabel.textContent = etaText(eta - el);
+    }, 150);
+    const stop = () => clearInterval(timer);
+
     try{
       const r = await fetch("/api/round", {method:"POST", headers:{"content-type":"application/json"},
         body: JSON.stringify({genre: selectedGenre})});
       if(!r.ok){ throw new Error("HTTP "+r.status+" "+(await r.text()).slice(0,160)); }
       const data = await r.json();
       if(data.error){ throw new Error(data.error); }
+      // 実測ビルド秒を保存（次マッチの ETA を実機に較正）。
+      if(data._build_seconds > 0){
+        try{ localStorage.setItem("qa_build_sec", String(data._build_seconds)); }catch(e){}
+      }
+      stop();
+      fill.style.width = "100%"; pct.textContent = "100%"; plabel.textContent = "";
       window.QUIZ_ROUND = data;
       return true;
     }catch(e){
+      stop();
+      prog.style.display = "none";
       status.innerHTML = "⚠ "+e.message;
       startBtn.disabled = false;
       return false;
@@ -263,6 +314,7 @@
     clearTimeout(navTimer);
     document.getElementById("boot").style.display = "grid";
     document.getElementById("status").textContent = "";
+    document.getElementById("prog").style.display = "none";
     document.getElementById("start").disabled = false;
   });
 
