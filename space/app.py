@@ -21,7 +21,6 @@ import json
 import os
 import pathlib
 import sys
-import threading
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -114,6 +113,10 @@ def _select_questions(n: int, genre: str | None = None) -> tuple[list[dict], str
     return data["questions"][:n], data.get("match", "Live Match")
 
 
+# 実測（2026-06-10・_gpu_diag で確認）: 1リクエスト = 物理GPU 1個（device_count=1）。
+# ただし bf16 の gemma-4 MoE が ~48.6GB で large(48GB) に収まらず xlarge(96GB MIG・2×quota)
+# で動作する（bnb-4bit は MoE エキスパートを量子化できず実質bf16）。物理1個/人なのでこのまま
+# 運用する（1×quota 化には fp8 量子化が必要だが今回は見送り）。
 @spaces.GPU(duration=120)
 def _gpu_build(questions: list[dict], match: str, theta: float) -> dict:
     global _MODELS
@@ -169,21 +172,16 @@ def api_genres():
     return {"genres": avail, "min_for_match": N_QUESTIONS}
 
 
-# ★ ZeroGPU は **並行する @spaces.GPU 呼び出しごとに別GPUを確保**する（マルチGPU仕様）。
-# 複数タブ/端末/観客が生成中（~36s）に同時に Start を押すと GPU を2個以上つかみ quota が
-# 倍速で溶ける。ここで single-flight 直列化し、常に1個だけ確保されるようにする
-# （2人目以降は GPU を要求する前にロック待ち＝順番に1個ずつ処理）。
-_BUILD_LOCK = threading.Lock()
-
-
 @app.post("/api/round")
 def api_round(payload: dict | None = None):
+    # ⚠ 直列化はしない（旧版の single-flight ロックは撤去）。複数ユーザーの同時プレイを許可し、
+    # ZeroGPU には各リクエストへ 1 GPU を割り当てさせる方針（「2人目以降を待たせる」のは
+    # 2-GPU 問題より大きな UX 欠陥）。1リクエスト=物理GPU1個は 2026-06-10 に実測確認済み。
     payload = payload or {}
     try:
-        with _BUILD_LOCK:                       # 直列化（同時に2個確保しない）
-            t0 = time.time()                    # 実ビルド秒（キュー待ちは含めない）
-            result = build_round_api(payload.get("genre"), payload.get("theta"))
-            result["_build_seconds"] = round(time.time() - t0, 1)  # frontend の ETA 自己較正用
+        t0 = time.time()
+        result = build_round_api(payload.get("genre"), payload.get("theta"))
+        result["_build_seconds"] = round(time.time() - t0, 1)  # frontend の ETA 自己較正用
         return JSONResponse(result)
     except Exception as e:  # noqa: BLE001
         import traceback
