@@ -1,70 +1,106 @@
-# quiz-ai — 早押しクイズ特化型LLMシステム
+<p align="center">
+  <img src="docs/assets/hero.svg" alt="quiz-ai — Japanese competitive buzz-quiz LLM system" width="100%">
+</p>
 
-競技早押しクイズ（hayaoshi quiz）に特化した2モデル構成のAIシステム。問題文を1文字ずつ受信し、
-人間と同条件（ハンデなし）で「いつ押すか」を判断して早押し対戦する。日本語特化。
+<p align="center">
+  <b>English</b> · <a href="README.ja.md">日本語</a>
+</p>
 
-差別化軸: **Reasoning獲得 / ゲーム理論的戦略 / クイズ文法学習 / 早押しタイミングの学習**
+<p align="center">
+  <a href="https://huggingface.co/spaces/build-small-hackathon/quiz-buzzer-ai"><img alt="HF Space" src="https://img.shields.io/badge/%F0%9F%A4%97%20Live%20Demo-HF%20Space-blue"></a>
+  <a href="https://huggingface.co/YUGOROU/quiz-main-gemma-merged"><img alt="Main model" src="https://img.shields.io/badge/%F0%9F%A4%97%20Model-Answering%20(gemma--4--26B)-red"></a>
+  <a href="https://huggingface.co/YUGOROU/quiz-buzz-reg-1.2bjp-merged"><img alt="Buzz model" src="https://img.shields.io/badge/%F0%9F%A4%97%20Model-Buzz%20(LFM2.5--1.2B)-blue"></a>
+  <img alt="params" src="https://img.shields.io/badge/params-%E2%89%A4%2032B%20(27.2B)-green">
+</p>
 
-> ライブデモ（HF Space・ZeroGPU）は `space/` に同梱。本リポジトリは**学習・評価・デモのコードのみ**を公開し、
-> 問題文を含むコーパス・デモ問題プールは再配布しない（下記ライセンス節）。
+# quiz-ai ⚡ — a Japanese competitive buzz-quiz LLM system
 
-## 2モデル構成（合計 ≤ 32B）
+A head-to-head **competitive buzz-quiz** (早押しクイズ) where a human plays against an AI under
+**equal conditions — no handicap**. The question is revealed one character at a time and both sides race
+to **buzz in as early as they dare**; buzzing too early on the lead-in is a costly false start. Built for
+the **[HF Build Small Hackathon](https://huggingface.co/build-small-hackathon)** (total params ≤ 32B).
 
-| 役割 | モデル | 機能 |
+> 早押しクイズ (*hayaoshi quiz*) is a Japanese competitive-quiz format. This project is **specialized for
+> Japanese** — questions are in 日本語, and the two models are fine-tuned on Japanese quiz grammar.
+
+## Demo
+
+<!-- Replace docs/assets/screenshot-bigscreen.png with a real capture of the running Space. -->
+<p align="center">
+  <img src="docs/assets/screenshot-bigscreen.png" alt="Big Screen UI — human vs AI buzz-quiz" width="80%">
+</p>
+
+▶️ **Try it live:** https://huggingface.co/spaces/build-small-hackathon/quiz-buzzer-ai
+
+## How it works — two fine-tuned models (≤ 32B total)
+
+| Role | Model | Job |
 |---|---|---|
-| 割り込み（buzz） | `YUGOROU/quiz-buzz-reg-1.2bjp-merged`（LFM2.5-1.2B + 回帰ヘッド） | 問題文を毎文字読み confidence を出力、`conf ≥ θ` で buzz。約9ms/char |
-| メインLLM | `YUGOROU/quiz-main-gemma-merged`（gemma-4-26B-A4B SFT） | buzz時点の部分問題文から `<think>…</think>` で推論し回答 |
-| STT | parakeet-tdt_ctc-0.6b-ja | CTC Streaming（文字単位出力・設計本命/デモではオプション） |
-| TTS | Irodori-TTS-500M-v3 | 問題文の読み上げ |
-| VAD | Silero VAD | 無音検出 |
+| 🔔 **Buzz timing** | [`quiz-buzz-reg-1.2bjp-merged`](https://huggingface.co/YUGOROU/quiz-buzz-reg-1.2bjp-merged) (LFM2.5-1.2B + regression head) | Reads the question char-by-char, emits a confidence; buzzes when `conf ≥ θ`. ~9 ms/char. |
+| 🧠 **Answering** | [`quiz-main-gemma-merged`](https://huggingface.co/YUGOROU/quiz-main-gemma-merged) (gemma-4-26B-A4B SFT) | From the partial question at buzz time, reasons in `<think>…</think>` and answers. |
 
-両モデルとも AI王 / JAQKET 由来のクイズ文法コーパスで SFT 済（コーパスは非公開、公開は重み＋推論コードのみ）。
+Both are fine-tuned on a quiz-grammar corpus derived from AI王 / JAQKET (≈ 27.2B params total).
 
-## リポジトリ構成
+## Architecture
+
+- **One GPU window = one match.** On ZeroGPU a single `@spaces.GPU(duration=120)` call **precomputes a
+  whole match** — buzz position, reasoning, answer and correctness for N questions. The frontend then
+  plays it back smoothly, streaming the question as mock-STT at 22 chars/s while the human can buzz in
+  live (**Space** / tap).
+- **Custom React frontend** (the spectator "Big Screen", 1920×1080) is served by a Gradio app and fetches
+  the live match from `POST /api/round`.
+- **Scoring:** correct = `1.0 + 0.5·(1 − buzzFrac)` (earlier buzz → bigger reward); wrong = `−1.5`.
+- **Speculative & async:** the answering model starts reasoning before the buzz is committed; `<think>`
+  reasoning is streamed so the AI answers in a few seconds — like a human pausing to think.
+- **TTS:** [Irodori-TTS](https://huggingface.co/Aratako/Irodori-TTS-500M-v3) reads the question aloud,
+  synced to the character reveal.
+
+## Repository layout
 
 ```
 quiz-ai/
-├── docs/         設計ドキュメント（quiz-ai.md / corpus.md / mactemp.md）
-├── src/          コーパス前処理・Phase0 オーケストレータ・共通ユーティリティ
-│   ├── qutils.py            正規化・採点(is_correct)・LLMクライアント・qid分割
-│   ├── annotate.py          Step1: S-buzz アノテーション
-│   ├── build_corpus{1,2}.py Step2/3: 割り込み用 / メイン用コーパス生成
-│   ├── build_rl_corpus.py   Step4: GRPO 用コーパス
-│   ├── label_genres.py      デモ問題プールのジャンル分類（LLM）
-│   ├── p0_orchestrator.py   Phase0: asyncio 投機推論オーケストレータ
-│   ├── p0_llm.py / buzz_client.py  メインLLM / buzz 判定クライアント
-│   └── p0_run_eval.py       Phase0a テキストF/S評価
-├── train/        訓練・評価（Modal 上で実行）
-│   ├── sft.py / modal_sft.py       メイン・buzz の SFT
-│   ├── buzz_reg.py / buzz_rl.py    buzz 回帰ヘッド / 単独RL
-│   ├── eval_knowledge.py           知識天井・全文/prefix 正解率評価
-│   ├── eval_buzz.py                buzz 位置 MAE 評価
-│   ├── e2e_modal.py                E2E（buzz→メイン投機推論→採点）検証
-│   └── check_gemma4_*.py           gemma-4 の SFT/vLLM 疎通確認
-├── serve/        推論サーバ配線（buzz FastAPI / メイン vLLM serve）
-├── bench/        速度ベンチ（LFM2.5 decode・問題文非含）
-└── space/        HF Space（ZeroGPU + Gradio）ライブデモ
+├── docs/         Design docs (quiz-ai.md / corpus.md) and assets
+├── src/          Corpus preprocessing, Phase-0 orchestrator, shared utilities
+│   ├── qutils.py            normalization · scoring (is_correct) · LLM client · qid split
+│   ├── annotate.py          Step 1: S-buzz annotation
+│   ├── build_corpus{1,2}.py Step 2/3: buzz-model / answering-model corpora
+│   ├── p0_orchestrator.py   Phase 0: asyncio speculative-inference orchestrator
+│   └── buzz_client.py       conf ≥ θ buzz decision client
+├── train/        Training & evaluation (run on Modal)
+│   ├── sft.py / modal_sft.py       SFT for the answering & buzz models
+│   ├── buzz_reg.py / buzz_rl.py    buzz regression head / single-model RL
+│   ├── eval_knowledge.py           knowledge-ceiling & full/prefix accuracy
+│   ├── eval_buzz.py                buzz-position MAE
+│   └── e2e_modal.py                end-to-end (buzz → speculative answer → scoring)
+├── serve/        Inference serving (buzz FastAPI / main vLLM)
+├── bench/        Latency benchmarks (LFM2.5 decode; no question text)
+└── space/        HF Space (ZeroGPU + Gradio) live demo
 ```
 
-## モデル（Hugging Face）
+## Models
 
-| 用途 | リポジトリ |
+| Use | Repo |
 |---|---|
-| メイン（gemma-4-26B-A4B SFT・統合） | `YUGOROU/quiz-main-gemma-merged` |
-| 割り込み（LFM2.5-1.2B 回帰ヘッド・統合） | `YUGOROU/quiz-buzz-reg-1.2bjp-merged` |
+| Answering (gemma-4-26B-A4B SFT) | [`YUGOROU/quiz-main-gemma-merged`](https://huggingface.co/YUGOROU/quiz-main-gemma-merged) |
+| Buzz timing (LFM2.5-1.2B + regression head) | [`YUGOROU/quiz-buzz-reg-1.2bjp-merged`](https://huggingface.co/YUGOROU/quiz-buzz-reg-1.2bjp-merged) |
 
-## 実行
+## Running
 
-- 訓練・評価は **Modal**（`uv run --with modal modal run train/…`）。
-- ライブデモは **HF Space（ZeroGPU）** で `space/` をデプロイ（詳細は `space/README.md`）。
-- スクリプトは `uv run` 前提（`python3` 直叩き不可）。詳細手順は各 `README.md` 参照。
+- **Training / evaluation** runs on **Modal**: `uv run --with modal modal run train/…`.
+- **Live demo** is the **HF Space (ZeroGPU)** under `space/` — see [`space/README.md`](space/README.md).
+- All scripts assume `uv run` (do not call `python3` directly).
 
-## データ・ライセンス（重要）
+## Data & license
 
-- 訓練データは AI王 (Project AIO) / JAQKET 由来。**問題文を含む生成物（`corpus/`・`annotated_questions.jsonl`・
-  デモ問題プール `questions_*.json` 等）は公開・再配布しない**（`.gitignore` 済み。`space/build_aio_pool.py` +
-  `src/label_genres.py` でローカル再生成する）。
-- 公開可能なのは学習済みモデル重み＋推論/学習コードのみ（帰属表記つき）。
+- Training data is derived from **AI王 (Project AIO) / JAQKET**. The **quiz questions are not
+  redistributed**: the corpus and demo question pool (`corpus/`, `annotated_questions.jsonl`,
+  `questions_*.json`, …) are git-ignored. Regenerate the demo pool locally with
+  `space/build_aio_pool.py` (downloads AI王 `data/aio`, CC BY-SA 4.0) + `src/label_genres.py`.
+- Only **model weights + training/inference code** are published, with attribution:
   > Quiz questions © abc/EQIDEN実行委員会 / 株式会社キュービック / クイズ法人カプリティオ. Non-commercial research use only. No dataset redistribution.
-- `space/irodori_tts/` は [Aratako/Irodori-TTS-500M-v3](https://huggingface.co/Aratako/Irodori-TTS-500M-v3) を vendoring したもので、上流ライセンスに従う。
-- 合成API: Crof.ai `deepseek-v4-flash`（フォールバック HF `gpt-oss-120b:cerebras`）。
+- `space/irodori_tts/` is vendored from [Aratako/Irodori-TTS-500M-v3](https://huggingface.co/Aratako/Irodori-TTS-500M-v3) and retains its upstream license.
+- The answering model inherits the [Gemma Terms of Use](https://ai.google.dev/gemma/terms); the buzz model inherits the [LFM Open License](https://huggingface.co/LiquidAI/LFM2.5-1.2B).
+
+## Acknowledgements
+
+[AI王 / Project AIO](https://sites.google.com/view/project-aio/) · [JAQKET](https://www.nlp.ecei.tohoku.ac.jp/projects/jaqket/) · [Google Gemma](https://ai.google.dev/gemma) · [LiquidAI LFM2.5](https://huggingface.co/LiquidAI) · [Irodori-TTS](https://huggingface.co/Aratako/Irodori-TTS-500M-v3) · [Unsloth](https://github.com/unslothai/unsloth) · the [HF Build Small Hackathon](https://huggingface.co/build-small-hackathon).
