@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/hero.svg" alt="quiz-ai — 早押しクイズ特化型LLMシステム" width="100%">
+  <img src="docs/assets/hero-ja.svg" alt="quiz-ai — 早押しクイズ特化型LLMシステム" width="100%">
 </p>
 
 <p align="center">
