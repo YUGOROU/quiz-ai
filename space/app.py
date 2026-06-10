@@ -132,12 +132,18 @@ def _mock_round(qs: list[dict], match: str) -> dict:
     out = [{"id": q.get("id"), "category": q.get("category", ""),
             "pattern": q.get("pattern", ""), "genre": q.get("genre", ""),
             "full": q["full"], "truth": q["truth"],
+            "truthKana": q.get("truth_kana", ""),
             "buzzer": "ai", "buzzFrac": 0.6, "answer": q["truth"], "correct": True,
+            "aiFullAnswer": q["truth"], "aiFullCorrect": True,
             "aiCrossed": True,
-            "aiThink": [{"frac": 0.3, "text": "（mock）手がかりを解析中…"},
-                        {"frac": 0.55, "text": f"（mock）{q['truth']} と予測"}]}
+            "confCurve": [{"f": round(0.15 + 0.85 * i / 9, 3), "c": round(0.05 + 0.9 * i / 9, 3)}
+                          for i in range(10)],
+            "aiThink": [{"frac": 0.3, "text": "（mock）手がかりを解析中…",
+                         "masked": "（mock）手がかりを解析中…"},
+                        {"frac": 0.55, "text": f"（mock）{q['truth']} と予測",
+                         "masked": "（mock）●● と予測"}]}
            for q in qs]
-    return {"match": match, "questions": out}
+    return {"match": match, "theta": DEFAULT_THETA, "questions": out}
 
 
 def build_round_api(genre: str | None = None, theta: float | None = None) -> dict:
@@ -145,6 +151,7 @@ def build_round_api(genre: str | None = None, theta: float | None = None) -> dic
     if MOCK:
         return _mock_round(qs_sel, match)
     qs = [{"id": q.get("id"), "full": q["full"], "truth": q["truth"],
+           "truth_kana": q.get("truth_kana", ""),
            "category": q.get("category", ""), "pattern": q.get("pattern", ""),
            "genre": q.get("genre", "")}
           for q in qs_sel]

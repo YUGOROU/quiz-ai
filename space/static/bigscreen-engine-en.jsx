@@ -16,10 +16,15 @@ function normalizeAns(s) {
   t = t.replace(/[ぁ-ゖ]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0x60)); // かな→カナ
   return t.replace(/\s+/g, "").trim();   // 日本語は語間空白が無いので空白は全除去
 }
-function judgeAnswer(input, truth) {
-  const a = normalizeAns(input), b = normalizeAns(truth);
-  if (!a || !b) return false;
-  return a === b || a.includes(b) || b.includes(a);
+// kana: 正解の読み仮名（truth_kana・pool 生成時に pykakasi で付与）。
+// 漢字の正解に「なつめそうせき」等のかな解答を救済するため、truth と両方に照合する。
+function judgeAnswer(input, truth, kana) {
+  const a = normalizeAns(input);
+  if (!a) return false;
+  return [truth, kana].filter(Boolean).some((t) => {
+    const b = normalizeAns(t);
+    return b && (a === b || a.includes(b) || b.includes(a));
+  });
 }
 
 function BigScreenApp() {
@@ -60,6 +65,14 @@ function BigScreenApp() {
   const [reboundTo, setReboundTo] = useState(null);        // "human" | "ai" | null
   const [aiRebound, setAiRebound] = useState(null);        // {answer, correct} AIが全文で答え返す時
   const [reveal, setReveal] = useState(null);              // {truth} 両者誤答 → 正答を大きく表示
+  // 解答制限時間（buzz 後に無制限に考えられると AI に不公平・テンポも死ぬ）
+  const ANSWER_SEC = 12;
+  const [answerLeft, setAnswerLeft] = useState(null);
+  // 振り返り（roundover の全問サマリー用・問題 idx → 両者の解答記録）
+  const outcomesRef = useRef({});
+  const recordOutcome = (idx, patch) => {
+    outcomesRef.current[idx] = Object.assign({}, outcomesRef.current[idx], patch);
+  };
 
   const timers = useRef([]);
   const clearTimers = () => { timers.current.forEach(clearTimeout); timers.current = []; };
@@ -111,12 +124,13 @@ function BigScreenApp() {
     setReboundTo(null);
     setAiRebound(null);
     setReveal(null);
-    // 最初の問題から始めるときはスコアもリセット（リプレイをクリーンに）
+    // 最初の問題から始めるときはスコアと振り返りもリセット（リプレイをクリーンに）
     if (idx === 0) {
       setScores({
         ai: { pts: 0, correct: 0, wrong: 0, buzzSum: 0, buzzN: 0 },
         human: { pts: 0, correct: 0, wrong: 0, buzzSum: 0, buzzN: 0 },
       });
+      outcomesRef.current = {};
     }
 
     // タイムライン本体。charMs（1文字あたりミリ秒）は音声長 or READ_CPS から決める。
@@ -130,13 +144,21 @@ function BigScreenApp() {
         const tc = Math.round(t.frac * len);
         at(tc * charMs + 60, () => setThinkShown((prev) => [...prev, t]));
       });
-      // confidence ランプ（buzzまで上昇）
-      const confSteps = 24;
-      for (let s = 1; s <= confSteps; s++) {
-        const ms = (buzzChar * charMs) * (s / confSteps);
-        const target = qq.buzzer === "ai" ? 0.04 + (0.95 - 0.04) * (s / confSteps)
-                                          : 0.04 + (0.62 - 0.04) * (s / confSteps);
-        at(ms, () => setConfidence(target));
+      // confidence ランプ。実測カーブ（buzz回帰ヘッドの confCurve）があれば本物を再生、
+      // 無ければ線形フォールバック（mock 等）。
+      if (qq.confCurve && qq.confCurve.length) {
+        qq.confCurve.forEach((pt) => {
+          const tc = Math.round(pt.f * len);
+          if (tc <= buzzChar) at(tc * charMs, () => setConfidence(pt.c));
+        });
+      } else {
+        const confSteps = 24;
+        for (let s = 1; s <= confSteps; s++) {
+          const ms = (buzzChar * charMs) * (s / confSteps);
+          const target = qq.buzzer === "ai" ? 0.04 + (0.95 - 0.04) * (s / confSteps)
+                                            : 0.04 + (0.62 - 0.04) * (s / confSteps);
+          at(ms, () => setConfidence(target));
+        }
       }
       // Buzz in（音声もここで停止＝読み上げが buzz 位置で止まる）
       at(buzzChar * charMs + 80, () => {
@@ -146,12 +168,14 @@ function BigScreenApp() {
         setPhase("buzzed");
         setBuzzCompare((bc) => ({ ...bc, [qq.buzzer]: qq.buzzFrac }));
         setFlash({ on: true, side: qq.buzzer, key: idx + "-" + Date.now() });
+        if (window.playBuzz) window.playBuzz(qq.buzzer);
       });
       at(buzzChar * charMs + 80 + 1100, () => setFlash(null));
 
       if (qq.buzzer === "human") {
         liveBuzzFrac.current = qq.buzzFrac;
-        at(buzzChar * charMs + 80 + 1200, () => { setPhase("answering"); setRevealRest(true); });
+        // 解答が確定するまで問題文の続きは見せない（カンニング防止）。
+        at(buzzChar * charMs + 80 + 1200, () => setPhase("answering"));
         return;
       }
       // AI buzzed — auto-resolve (scripted)
@@ -159,8 +183,10 @@ function BigScreenApp() {
       at(buzzChar * charMs + 80 + 2600, () => {
         setPhase("judged");
         const reward = 1.0 + 0.5 * (1 - qq.buzzFrac);
-        setLastResult({ correct: qq.correct, pts: reward });
+        setLastResult({ correct: qq.correct, pts: reward,
+          delta: qq.correct ? reward : -1.5 });
         if (window.playResult) window.playResult(qq.correct);   // AI判定の正誤音
+        recordOutcome(idx, { aiAns: qq.answer, aiOk: qq.correct, aiFrac: qq.buzzFrac });
         setScores((prev) => {
           const next = JSON.parse(JSON.stringify(prev));
           const me = next.ai;
@@ -184,6 +210,9 @@ function BigScreenApp() {
     if (qq.audio) {
       const audio = new Audio(qq.audio);
       audio.preload = "auto";
+      audio.muted = !!window.__muteAll;   // nav のミュートトグルに追従
+      audio.playbackRate = speed;         // タイムラインは at() が /speed するので音声側も同期
+      window.__curAudio = audio;
       audioRef.current = audio;
       let started = false;
       const startWith = (charMs) => { if (started) return; started = true; buildTimeline(charMs); };
@@ -232,18 +261,22 @@ function BigScreenApp() {
     setBuzzCompare((bc) => ({ ...bc, human: liveBuzzFrac.current }));
     setPhase("buzzed");
     setFlash({ on: true, side: "human", key: idx + "-h-" + Date.now() });
+    if (window.playBuzz) window.playBuzz("human");
     at(1100, () => setFlash(null));
-    at(1200, () => { setPhase("answering"); setRevealRest(true); });
+    // 解答確定まで問題文の続きは隠す（早押しの意味を守る・カンニング防止）。
+    at(600, () => setPhase("answering"));
   }, [round]);
 
-  // AI が全文で答え返す（人間が誤答した後のリバウンド）。precompute 済 aiFullAnswer を使う。
+  // AI が全文で答え返す（人間が誤答／パスした後のリバウンド）。precompute 済 aiFullAnswer を使う。
   const aiReboundResolve = useCallback((idx, qq) => {
     const fa = qq.aiFullAnswer || qq.answer;
     const fc = !!qq.aiFullCorrect;
     setReboundTo("ai");
     setAiRebound({ answer: fa, correct: fc });
+    setRevealRest(true);   // AIは全文で答えるので、観客にも全文を見せる
     at(2000, () => {
       if (window.playResult) window.playResult(fc);   // AIリバウンド解答の正誤音
+      recordOutcome(idx, { aiAns: fa, aiOk: fc, aiRebound: true });
       setScores((prev) => {
         const next = JSON.parse(JSON.stringify(prev));
         if (fc) { next.ai.pts += 1.0; next.ai.correct += 1; }
@@ -259,14 +292,16 @@ function BigScreenApp() {
     if (phaseRef.current !== "answering") return;
     const idx = qIndexRef.current;
     const qq = round.questions[idx];
-    const correct = judgeAnswer(text, qq.truth);
+    const correct = judgeAnswer(text, qq.truth, qq.truthKana);
     setHumanAnswer(text);
     setPhase("judged");
+    setRevealRest(true);   // 解答が確定したのでここで全文を開示
 
     if (reboundToRef.current === "human") {
       // AI 誤答後のリバウンド解答：正解はフラット +1.0、不正解はそれ以上減点しない。
-      setLastResult({ correct, pts: 1.0 });
+      setLastResult({ correct, pts: 1.0, delta: correct ? 1.0 : 0 });
       if (window.playResult) window.playResult(correct);   // 人間リバウンド解答の正誤音
+      recordOutcome(idx, { humanAns: text, humanOk: correct, humanRebound: true });
       setScores((prev) => {
         const next = JSON.parse(JSON.stringify(prev));
         if (correct) { next.human.pts += 1.0; next.human.correct += 1; }
@@ -279,8 +314,9 @@ function BigScreenApp() {
 
     // 通常（人間が早押しした本解答）
     const reward = 1.0 + 0.5 * (1 - liveBuzzFrac.current);
-    setLastResult({ correct, pts: reward });
+    setLastResult({ correct, pts: reward, delta: correct ? reward : -1.5 });
     if (window.playResult) window.playResult(correct);   // 人間の早押し解答の正誤音
+    recordOutcome(idx, { humanAns: text, humanOk: correct, humanFrac: liveBuzzFrac.current });
     setScores((prev) => {
       const next = JSON.parse(JSON.stringify(prev));
       const me = next.human;
@@ -297,21 +333,44 @@ function BigScreenApp() {
     }
   }, [round, autoplay, total, aiReboundResolve]);
 
-  // Human passes (no answer).
+  // Human passes (no answer / time up).
   const passHuman = useCallback(() => {
     if (phaseRef.current !== "answering") return;
     const idx = qIndexRef.current;
     const qq = round.questions[idx];
     clearTimers();
+    setPhase("judged");
     if (reboundToRef.current === "human") {
       // AI 誤答後に人間もパス → 両者解答なし → 正答を表示して次へ
-      setPhase("judged");
+      setRevealRest(true);
       setReveal({ truth: qq.truth });
       if (autoplay) at(3800, () => advance(idx));
       return;
     }
-    advance(idx);
-  }, [round, autoplay, total]);
+    // 人間が早押し後にパス → 誤答と同じく AI に解答権が移る（ルール一貫・正答も必ず見える）。
+    recordOutcome(idx, { humanAns: "", humanOk: false, humanFrac: liveBuzzFrac.current });
+    aiReboundResolve(idx, qq);
+  }, [round, autoplay, total, aiReboundResolve]);
+
+  // 解答制限時間: answering になったらカウントダウン、0 でパス扱い。
+  const passRef = useRef(null);
+  useEffect(() => { passRef.current = passHuman; }, [passHuman]);
+  useEffect(() => {
+    if (phase !== "answering") { setAnswerLeft(null); return; }
+    setAnswerLeft(ANSWER_SEC);
+    const iv = setInterval(() => {
+      setAnswerLeft((p) => {
+        if (p == null) return p;
+        if (p <= 1) {
+          clearInterval(iv);
+          if (passRef.current) passRef.current();
+          return 0;
+        }
+        return p - 1;
+      });
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [phase, qIndex]);
 
   // Expose handlers + Space-to-buzz.
   useEffect(() => {
@@ -335,55 +394,107 @@ function BigScreenApp() {
     ? (sideUsed === "ai" ? T("ai") : T("human")) + T("buzzAt") + Math.round((fracUsed || 0) * 100) + "%"
     : "";
   const buzzer = (phase === "buzzed" || phase === "answer" || phase === "answering" || phase === "judged") ? activeBuzzer : null;
+  const theta = round.theta || THRESHOLD_BASE;
+  // 人間が AI より先に押した問題は、判定後に「AI はここで押す予定だった」を問題文中に示す。
+  const aiPlanFrac = (activeBuzzer === "human" && phase === "judged" && q) ? q.buzzFrac : null;
 
   return (
     <div className="stage-root" data-dir={dir} data-fx={fx}>
-      <TopBar qIndex={qIndex} total={total} phase={phase} />
+      <TopBar qIndex={qIndex} total={total} phase={phase} genre={q && q.genre} />
       <div className="mid">
         <AIColumn q={q} thinkShown={thinkShown}
           phase={phase} buzzer={buzzer} result={buzzer === "ai" ? lastResult : null}
-          showReasoning={showReasoning} />
+          showReasoning={showReasoning} confidence={confidence} theta={theta} />
         <CenterBoard scores={scores} />
         <HumanColumn q={q} phase={phase} buzzer={buzzer}
           result={buzzer === "human" ? lastResult : null}
-          humanAnswer={humanAnswer}
+          humanAnswer={humanAnswer} timeLeft={answerLeft}
           onBuzz={humanBuzz} onAnswer={submitHumanAnswer} onPass={passHuman}
           followUp={phase === "judged" && q.followUp ? q.followUp : null} />
       </div>
       <div className="qband">
         <QuestionText q={q} seen={seen} phase={phase} buzzer={buzzer}
-          accentLabel={accentLabel} revealRest={revealRest} />
+          accentLabel={accentLabel} revealRest={revealRest} aiPlan={aiPlanFrac} />
       </div>
       <FlashLayer flash={flash} fx={fx} />
       <ReboundBanner reboundTo={reboundTo} aiRebound={aiRebound} reveal={reveal}
         aiAnswer={q && q.answer} />
       {reveal && <RevealOverlay truth={reveal.truth} />}
-      {phase === "roundover" && <RoundOver scores={scores} onReplay={() => runQuestion(0)} />}
+      {phase === "roundover" && (
+        <RoundOver scores={scores} round={round} outcomes={outcomesRef.current}
+          onReplay={() => runQuestion(0)}
+          onNew={() => { if (window.__newMatch) window.__newMatch(); }} />
+      )}
     </div>
   );
 }
 
-function RoundOver({ scores, onReplay }) {
-  const win = scores.ai.correct === scores.human.correct ? "draw" : (scores.ai.correct > scores.human.correct ? "ai" : "human");
+function RoundOver({ scores, round, outcomes, onReplay, onNew }) {
+  // 勝敗はポイント（早押しボーナス・誤答ペナルティ込み）で決める。正解数は併記。
+  const d = scores.ai.pts - scores.human.pts;
+  const win = Math.abs(d) < 0.001 ? "draw" : (d > 0 ? "ai" : "human");
+  const fmt = (v) => (Math.round(v * 10) / 10).toFixed(1);
+
+  const share = () => {
+    const text = T("share.text")
+      .replace("{h}", scores.human.correct).replace("{a}", scores.ai.correct)
+      .replace("{hp}", fmt(scores.human.pts)).replace("{ap}", fmt(scores.ai.pts));
+    const url = "https://huggingface.co/spaces/build-small-hackathon/quiz-buzzer-ai";
+    window.open("https://twitter.com/intent/tweet?text=" + encodeURIComponent(text)
+      + "&url=" + encodeURIComponent(url), "_blank", "noopener");
+  };
+
+  const mark = (ok) => (ok ? <span className="rc-ok">●</span> : <span className="rc-ng">✕</span>);
+  const qs = (round && round.questions) || [];
+
   return (
-    <div style={{ position: "absolute", inset: 0, zIndex: 50, display: "grid", placeItems: "center",
-      background: "color-mix(in oklab, var(--bg) 78%, transparent)", backdropFilter: "blur(6px)" }}>
-      <div style={{ textAlign: "center", background: "var(--panel)", border: "1px solid var(--line)",
-        borderRadius: 22, padding: "48px 64px", boxShadow: "0 30px 80px rgba(40,38,30,.16)" }}>
-        <div style={{ fontFamily: "var(--mono)", fontSize: 13, letterSpacing: ".1em", textTransform: "uppercase",
-          color: "var(--ink2)", marginBottom: 18 }}>{T("result")}</div>
-        <div style={{ fontSize: 40, fontWeight: 800, marginBottom: 8,
+    <div className="roundover-veil">
+      <div className="roundover-card">
+        <div className="ro-label">{T("result")}</div>
+        <div className="ro-winner" style={{
           color: win === "ai" ? "var(--ai)" : win === "human" ? "var(--hu)" : "var(--ink)" }}>
           {win === "draw" ? T("draw") : win === "ai" ? T("aiWins") : T("humanWins")}
         </div>
-        <div style={{ fontSize: 56, fontWeight: 800, fontVariantNumeric: "tabular-nums", marginBottom: 24 }}>
-          <span style={{ color: "var(--ai)" }}>{scores.ai.correct}</span>
-          <span style={{ color: "var(--ink3)", margin: "0 16px" }}>—</span>
-          <span style={{ color: "var(--hu)" }}>{scores.human.correct}</span>
+        <div className="ro-pts">
+          <span style={{ color: "var(--ai)" }}>{fmt(scores.ai.pts)}<small>{T("pts")}</small></span>
+          <span className="ro-dash">—</span>
+          <span style={{ color: "var(--hu)" }}>{fmt(scores.human.pts)}<small>{T("pts")}</small></span>
         </div>
-        <button onClick={onReplay} style={{ font: "600 15px var(--ui-font)", padding: "12px 28px",
-          borderRadius: 999, border: "1px solid var(--line)", background: "var(--ink)", color: "var(--bg)",
-          cursor: "pointer" }}>{T("replay")}</button>
+        <div className="ro-sub">
+          {T("correctN")}: <b style={{ color: "var(--ai)" }}>{scores.ai.correct}</b>
+          <span className="ro-dim"> vs </span>
+          <b style={{ color: "var(--hu)" }}>{scores.human.correct}</b>
+        </div>
+        {qs.length > 0 && (
+          <div className="recap">
+            <div className="recap-head">{T("recap")}</div>
+            <table className="recap-table">
+              <thead>
+                <tr><th></th><th className="rc-q">{T("colQ")}</th><th>{T("colTruth")}</th>
+                  <th>{T("colAI")}</th><th>{T("colYou")}</th></tr>
+              </thead>
+              <tbody>
+                {qs.map((qq, i) => {
+                  const o = (outcomes && outcomes[i]) || {};
+                  return (
+                    <tr key={i}>
+                      <td className="rc-no">{i + 1}</td>
+                      <td className="rc-q">{qq.full.length > 26 ? qq.full.slice(0, 26) + "…" : qq.full}</td>
+                      <td className="rc-truth">{qq.truth}</td>
+                      <td>{o.aiAns != null ? <span>{o.aiAns || "—"} {mark(o.aiOk)}</span> : <span className="ro-dim">—</span>}</td>
+                      <td>{o.humanAns != null ? <span>{o.humanAns || T("pass")} {mark(o.humanOk)}</span> : <span className="ro-dim">—</span>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="ro-actions">
+          <button className="ro-btn primary" onClick={onNew}>{T("boot.newMatch")}</button>
+          <button className="ro-btn" onClick={onReplay}>{T("watchReplay")}</button>
+          <button className="ro-btn share" onClick={share}>𝕏 {T("share")}</button>
+        </div>
       </div>
     </div>
   );

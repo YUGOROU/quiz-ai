@@ -50,6 +50,20 @@
     } catch (e) {}
   };
 
+  // 早押し（buzz-in）: 立ち上がりの2音「ピッポン」。人間=高め／AI=低めで識別できる。
+  window.playBuzz = function (side) {
+    if (window.__muteSfx) return;
+    try {
+      if (side === "human") {
+        tone(660, 0.00, 0.07, "square", 0.20);
+        tone(990, 0.06, 0.16, "square", 0.22);
+      } else {
+        tone(440, 0.00, 0.07, "square", 0.20);
+        tone(660, 0.06, 0.16, "square", 0.22);
+      }
+    } catch (e) {}
+  };
+
   // 判定結果に応じて鳴らすショートカット。
   window.playResult = function (correct) {
     if (correct) window.playCorrect(); else window.playWrong();

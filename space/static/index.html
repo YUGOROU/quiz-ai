@@ -54,6 +54,12 @@
     border:0;border-radius:999px;padding:14px 34px;cursor:pointer;}
   #boot button#start:disabled{opacity:.5;cursor:default;}
   #boot .status{margin-top:18px;font-family:"DM Mono",monospace;font-size:13px;color:#6d6a62;min-height:18px;}
+  #boot .err-main{font-family:"Noto Sans JP",sans-serif;font-size:14px;color:#e8b9b4;line-height:1.7;max-width:560px;margin:0 auto;}
+  #boot .err-raw{font-size:11px;color:#6d6a62;margin-top:8px;word-break:break-all;max-width:560px;margin-left:auto;margin-right:auto;}
+  /* 生成待ちティップス（ルール・モデル解説のローテーション） */
+  #tips{display:none;margin:22px auto 0;max-width:560px;font-family:"Noto Sans JP",sans-serif;
+    font-size:13px;line-height:1.8;color:#a8a49a;background:rgba(255,255,255,.04);
+    border:1px solid rgba(255,255,255,.09);border-radius:12px;padding:13px 18px;min-height:44px;}
   .spin{display:inline-block;width:14px;height:14px;border:2px solid #6d6a62;border-top-color:#f3f1ea;
     border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px;margin-right:8px;}
   @keyframes sp{to{transform:rotate(360deg);}}
@@ -103,19 +109,22 @@
       <div class="bar"><div class="fill" id="prog-fill"></div></div>
       <div class="meta"><span id="prog-label"></span><span class="pct" id="prog-pct">0%</span></div>
     </div>
+    <div id="tips"></div>
   </div>
 </div>
 
 <div class="nav" id="nav">
   <span class="lbl" id="nav-lbl">Quiz Buzzer AI · Live</span>
   <span class="sep"></span>
+  <button id="btn-mute" title="Mute" aria-label="Mute">🔊</button>
+  <span class="sep"></span>
   <button id="btn-replay">▶ Replay</button>
   <span class="sep"></span>
   <button id="btn-new">✦ New match</button>
 </div>
 
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
 
 <!-- i18n（プレーン script。babel スクリプトより前に window.T / window.__lang を用意） -->
@@ -146,7 +155,7 @@
 
 <script>
   // ── 状態 ──────────────────────────────────────────────
-  let rendered = false;
+  let rootHandle = null;      // React root（マッチごとに key 付き remount）
   let selectedGenre = null;   // null = おまかせ（全ジャンル）
 
   // ── boot 画面の文言を現在の言語で描画 ──────────────────
@@ -208,6 +217,14 @@
     const s = Math.ceil(remainSec);
     return (window.__lang === "en") ? ("~" + s + "s remaining") : ("残り 約 " + s + " 秒");
   }
+  // エラーを人間語に（ZeroGPU quota / GPU混雑 / ネットワーク）。生メッセージは小さく併記。
+  function friendlyError(msg){
+    const m = String(msg || "").toLowerCase();
+    if(m.includes("quota") || m.includes("zerogpu") || m.includes("429")) return T("err.quota");
+    if(m.includes("failed to fetch") || m.includes("networkerror") || m.includes("load failed"))
+      return T("err.net");
+    return T("err.server");
+  }
   // ── 実モデルで1マッチ生成（QUIZ_ROUND）。tqdm 風に %／残り時間を表示 ──────────
   async function fetchRound(){
     const status = document.getElementById("status");
@@ -217,6 +234,7 @@
     const pct = document.getElementById("prog-pct");
     const plabel = document.getElementById("prog-label");
     startBtn.disabled = true;
+    startBtn.textContent = T("boot.start");   // 前回エラーで「再試行」表記になっていても戻す
     status.innerHTML = '<span class="spin"></span>' + T("boot.generating");
 
     // 自己較正 ETA: 前回の実測ビルド秒（_build_seconds）を localStorage に保持。
@@ -226,6 +244,16 @@
       if(v > 0) eta = Math.min(90, Math.max(6, v)); }catch(e){}
     prog.style.display = "block";
     fill.style.width = "0%"; pct.textContent = "0%"; plabel.textContent = etaText(eta);
+    // 待ち時間にルール・モデル解説のティップスをローテーション表示（死に時間を初見教育に充てる）。
+    const tipsEl = document.getElementById("tips");
+    const TIP_KEYS = ["tip.1", "tip.2", "tip.3", "tip.4"];
+    let tipIdx = 0;
+    tipsEl.style.display = "block";
+    tipsEl.textContent = T(TIP_KEYS[0]);
+    const tipTimer = setInterval(() => {
+      tipIdx = (tipIdx + 1) % TIP_KEYS.length;
+      tipsEl.textContent = T(TIP_KEYS[tipIdx]);
+    }, 6000);
     const t0 = performance.now();
     const timer = setInterval(() => {
       const el = (performance.now() - t0) / 1000;
@@ -237,7 +265,7 @@
       fill.style.width = p + "%"; pct.textContent = p + "%";
       plabel.textContent = etaText(eta - el);
     }, 150);
-    const stop = () => clearInterval(timer);
+    const stop = () => { clearInterval(timer); clearInterval(tipTimer); tipsEl.style.display = "none"; };
 
     try{
       const r = await fetch("/api/round", {method:"POST", headers:{"content-type":"application/json"},
@@ -256,8 +284,17 @@
     }catch(e){
       stop();
       prog.style.display = "none";
-      status.innerHTML = "⚠ "+e.message;
+      // 人間語の説明＋生メッセージ小表示（DOM 構築で HTML 注入を避ける）
+      status.textContent = "";
+      const main = document.createElement("div");
+      main.textContent = "⚠ " + friendlyError(e.message);
+      main.className = "err-main";
+      const raw = document.createElement("div");
+      raw.textContent = e.message;
+      raw.className = "err-raw";
+      status.appendChild(main); status.appendChild(raw);
       startBtn.disabled = false;
+      startBtn.textContent = T("boot.retry");
       return false;
     }
   }
@@ -277,16 +314,23 @@
   function renderStage(){
     document.getElementById("boot").style.display = "none";
     navActive = true;   // 既定は非表示・マウス移動で右下に一時表示
-    if(!rendered){
-      // プレーン script なので JSX は使えない（SyntaxError でクリックリスナーごと死ぬ）。
-      // React.createElement で生成する。
-      ReactDOM.createRoot(document.getElementById("root")).render(
-        React.createElement(window.BigScreenApp));
-      rendered = true;
-    }else if(window.__replay){
-      window.__replay();
-    }
+    // プレーン script なので JSX は使えない（SyntaxError でクリックリスナーごと死ぬ）。
+    // React.createElement で生成する。マッチごとに key を変えて remount しないと、
+    // コンポーネントが古い window.QUIZ_ROUND を閉じ込めたまま＝「新しい対戦」でも
+    // 同じ問題が再生されるバグになる。
+    if(!rootHandle) rootHandle = ReactDOM.createRoot(document.getElementById("root"));
+    rootHandle.render(React.createElement(window.BigScreenApp, {key: Date.now()}));
   }
+
+  // roundover 画面の「新しい対戦」: boot に戻って同じジャンル設定のまま即生成開始。
+  window.__newMatch = () => {
+    navActive = false;
+    document.getElementById("nav").classList.remove("show");
+    clearTimeout(navTimer);
+    document.getElementById("boot").style.display = "grid";
+    document.getElementById("status").textContent = "";
+    document.getElementById("start").click();
+  };
   // 3・2・1・Go! の演出（各 ~0.85s）。Promise で完了を待ってから big-screen を描画。
   function runCountdown(){
     return new Promise((resolve) => {
@@ -310,6 +354,14 @@
     if(await fetchRound()){ await runCountdown(); renderStage(); }
   });
   document.getElementById("btn-replay").addEventListener("click", () => window.__replay && window.__replay());
+  // ミュート（効果音＋TTS読み上げ）。engine 側は __muteAll を見て audio.muted を切り替える。
+  document.getElementById("btn-mute").addEventListener("click", (e) => {
+    const on = !window.__muteAll;
+    window.__muteAll = on;
+    window.__muteSfx = on;
+    if(window.__curAudio) window.__curAudio.muted = on;
+    e.currentTarget.textContent = on ? "🔇" : "🔊";
+  });
   document.getElementById("btn-new").addEventListener("click", () => {
     navActive = false;
     const nav = document.getElementById("nav");

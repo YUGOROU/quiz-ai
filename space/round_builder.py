@@ -216,8 +216,9 @@ def _buzz_confs(m: Models, texts, batch_size, max_seq_length):
 
 
 def _find_buzz_pos(m: Models, question: str, theta: float, stride: int,
-                   batch_size: int, max_seq_length: int) -> tuple[int, bool]:
-    """char-stream を stride 走査し conf≥θ の初出位置を返す（無交差なら全長・False）。"""
+                   batch_size: int, max_seq_length: int) -> tuple[int, bool, list[dict]]:
+    """char-stream を stride 走査し conf≥θ の初出位置を返す（無交差なら全長・False）。
+    第3返り値は実測の確信度カーブ [{f: 位置/全長, c: conf}]（frontend のライブメーター用）。"""
     L = len(question)
     start = max(10, int(0.15 * L))
     positions = list(range(start, L + 1, max(1, stride)))
@@ -226,10 +227,11 @@ def _find_buzz_pos(m: Models, question: str, theta: float, stride: int,
     confs = _buzz_confs(
         m, [BUZZ_USER_TEMPLATE.format(n=p, prefix=question[:p]) for p in positions],
         batch_size, max_seq_length)
+    curve = [{"f": round(p / L, 3), "c": round(c, 3)} for p, c in zip(positions, confs)]
     for p, c in zip(positions, confs):
         if c >= theta:
-            return p, True
-    return L, False
+            return p, True, curve
+    return L, False, curve
 
 
 def _main_generate(m: Models, prefix: str, max_new_tokens: int, think: bool):
@@ -299,8 +301,13 @@ def _main_generate_batch(m: Models, prefixes: list[str], max_new_tokens: int, th
 _SENT_SPLIT = re.compile(r"(?<=[。！？\.!?])\s*")
 
 
-def _think_steps(think_txt: str, buzz_frac: float, max_steps: int = 3) -> list[dict]:
-    """<think> を文分割し frac を ~0.2〜buzz_frac に均等配置（最大 max_steps 文）。"""
+def _think_steps(think_txt: str, buzz_frac: float, max_steps: int = 3,
+                 mask: tuple = ()) -> list[dict]:
+    """<think> を文分割し frac を ~0.2〜buzz_frac に均等配置（最大 max_steps 文）。
+
+    mask: 解答候補の文字列群。読み上げ中に think を表示すると人間が答えを読めて
+    しまう（カンニング）ため、各文の mask 文字列を ●● に置換した "masked" も併載する。
+    frontend は判定前 masked / 判定後 text を表示する。"""
     if not think_txt:
         return []
     sents = [s.strip() for s in _SENT_SPLIT.split(think_txt) if s.strip()]
@@ -309,12 +316,19 @@ def _think_steps(think_txt: str, buzz_frac: float, max_steps: int = 3) -> list[d
     # 長すぎる場合は末尾優先で max_steps 文に圧縮（決定的な手がかりは後半に出る）。
     if len(sents) > max_steps:
         sents = sents[-max_steps:]
+
+    def _masked(s: str) -> str:
+        for t in mask:
+            if t and len(t) >= 2:
+                s = s.replace(t, "●●")
+        return s
+
     n = len(sents)
     lo, hi = 0.18, max(0.22, buzz_frac - 0.02)
     steps = []
     for i, s in enumerate(sents):
         frac = lo + (hi - lo) * (i / max(1, n - 1)) if n > 1 else hi
-        steps.append({"frac": round(frac, 3), "text": s})
+        steps.append({"frac": round(frac, 3), "text": s, "masked": _masked(s)})
     return steps
 
 
@@ -344,9 +358,9 @@ def build_round(questions: list[dict], m: Models, *, qutils,
         L = len(full)
         if progress:
             progress(i, len(questions), q.get("id"))
-        buzz_pos, crossed = _find_buzz_pos(m, full, theta, stride, buzz_batch, max_seq_length)
+        buzz_pos, crossed, curve = _find_buzz_pos(m, full, theta, stride, buzz_batch, max_seq_length)
         metas.append({"q": q, "full": full, "L": L, "buzz_pos": buzz_pos,
-                      "crossed": crossed, "prefix": full[:buzz_pos],
+                      "crossed": crossed, "prefix": full[:buzz_pos], "curve": curve,
                       "golds": q["truth"] if isinstance(q["truth"], list) else [q["truth"]]})
 
     # ── pass 2: gemma 生成（buzz地点回答 ＋ rebound 用の全文回答）をまとめてバッチ ──
@@ -366,6 +380,8 @@ def build_round(questions: list[dict], m: Models, *, qutils,
         L = mm["L"]
         buzz_frac = round(min(0.99, mm["buzz_pos"] / L), 4)
         correct = qutils.is_correct(answer, mm["golds"], loose=True)
+        # think マスク対象＝AIの解答と正解（reading 中の表示で人間が答えを読めないように）。
+        mask_strs = tuple({s for s in (answer, mm["golds"][0]) if s})
         rec = {
             "id": mm["q"].get("id", i + 1),
             "category": mm["q"].get("category", ""),
@@ -373,11 +389,13 @@ def build_round(questions: list[dict], m: Models, *, qutils,
             "genre": mm["q"].get("genre", ""),
             "full": mm["full"],
             "truth": mm["golds"][0],
+            "truthKana": mm["q"].get("truth_kana", ""),  # かな解答の判定救済（frontend judge 用）
             "buzzer": "ai",          # AI は buzz_frac で押す。human は live で先押し可（engine 側）。
             "buzzFrac": buzz_frac,
             "answer": answer,
             "correct": bool(correct),
-            "aiThink": _think_steps(think_txt, buzz_frac),
+            "aiThink": _think_steps(think_txt, buzz_frac, mask=mask_strs),
+            "confCurve": mm["curve"],    # buzz 回帰ヘッドの実測確信度カーブ（ライブメーター用）
             "aiCrossed": mm["crossed"],  # θ 未交差（自信不足で全文まで行った）かの内部フラグ
         }
         if rebound and full_gens[i] is not None:
@@ -391,4 +409,4 @@ def build_round(questions: list[dict], m: Models, *, qutils,
         for rec in out_qs:
             rec["audio"] = _synth_audio(m.tts, rec["full"], tts_ref, tts_steps)
 
-    return {"match": match, "questions": out_qs}
+    return {"match": match, "theta": theta, "questions": out_qs}

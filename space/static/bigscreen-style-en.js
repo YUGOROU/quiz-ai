@@ -211,4 +211,75 @@ window.BIGSCREEN_CSS = `
 .ai-submit:hover{filter:brightness(1.06);}
 .ai-submit:disabled{opacity:.4;cursor:not-allowed;}
 .ai-err{font-size:13px;color:var(--ng);font-weight:600;}
+
+/* ── 解答制限時間（AnswerInput 内） ─────────────────── */
+.ai-timer{float:right;font-family:var(--mono);font-size:14px;font-weight:600;color:var(--ink2);
+  font-variant-numeric:tabular-nums;}
+.ai-timer.urgent{color:var(--ng);animation:tblink .6s step-end infinite;}
+@keyframes tblink{50%{opacity:.35;}}
+
+/* ── TopBar ジャンル表示 ───────────────────────────── */
+.genre-tag{font:600 14px "Noto Sans JP",var(--ui-font);color:var(--ink2);
+  background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:5px 14px;}
+
+/* ── AI確信度メーター（buzz回帰ヘッドの実測カーブ） ── */
+.confwrap{display:flex;flex-direction:column;gap:7px;}
+.confbar{position:relative;height:10px;border-radius:999px;background:var(--panel2);
+  border:1px solid var(--line);overflow:visible;}
+.cb-fill{position:absolute;left:0;top:0;bottom:0;border-radius:999px;
+  background:linear-gradient(90deg,color-mix(in oklab,var(--ai) 55%,var(--panel)),var(--ai));
+  transition:width .35s ease;}
+.cb-th{position:absolute;top:-4px;bottom:-4px;width:2.5px;background:var(--ink);
+  border-radius:2px;opacity:.6;}
+.cb-lab{font-family:var(--mono);font-size:13px;color:var(--ink2);letter-spacing:.02em;
+  display:flex;align-items:baseline;gap:8px;}
+.cb-lab b{color:var(--ai);font-variant-numeric:tabular-nums;font-size:15px;}
+.cb-theta{margin-left:auto;color:var(--ink3);}
+
+/* ── 中央スコア＝ポイント主表示 ───────────────────── */
+.score-sub{display:block;font-family:var(--mono);font-size:16px;font-weight:500;
+  color:var(--ink2);margin-top:10px;letter-spacing:.02em;}
+.score-unit{font-family:var(--mono);font-size:13px;color:var(--ink3);margin-top:16px;
+  letter-spacing:.1em;}
+
+/* ── AI押下予定マーカー（人間が先押しした問題の判定後） ── */
+.qtext .buzzmark.plan::before{background:transparent;border-left:4px dashed var(--ai);
+  width:0;box-shadow:none;opacity:.75;}
+.qtext .buzzmark.plan::after{background:var(--panel);color:var(--ai);
+  border:1.5px dashed var(--ai);top:auto;bottom:-40px;}
+
+/* ── ROUND OVER（ポイント勝敗＋振り返り＋シェア） ──── */
+.roundover-veil{position:absolute;inset:0;z-index:50;display:grid;place-items:center;
+  background:color-mix(in oklab,var(--bg) 78%,transparent);backdrop-filter:blur(6px);}
+.roundover-card{text-align:center;background:var(--panel);border:1px solid var(--line);
+  border-radius:22px;padding:40px 56px 34px;box-shadow:0 30px 80px rgba(40,38,30,.16);
+  max-width:1240px;max-height:920px;overflow:auto;}
+.ro-label{font-family:var(--mono);font-size:13px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink2);margin-bottom:14px;}
+.ro-winner{font-size:40px;font-weight:800;margin-bottom:6px;}
+.ro-pts{font-size:56px;font-weight:800;font-variant-numeric:tabular-nums;margin-bottom:6px;}
+.ro-pts small{font-size:20px;font-weight:700;margin-left:4px;color:var(--ink3);}
+.ro-dash{color:var(--ink3);margin:0 16px;}
+.ro-sub{font-size:17px;color:var(--ink2);margin-bottom:20px;}
+.ro-sub b{font-size:20px;}
+.ro-dim{color:var(--ink3);}
+.recap{margin:0 auto 22px;text-align:left;}
+.recap-head{font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink2);margin-bottom:10px;text-align:center;}
+.recap-table{width:100%;border-collapse:collapse;font-size:15px;line-height:1.45;}
+.recap-table th{font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink3);
+  text-align:left;font-weight:500;padding:4px 12px;border-bottom:1px solid var(--line);}
+.recap-table td{padding:8px 12px;border-bottom:1px solid var(--line2);vertical-align:top;}
+.recap-table .rc-no{font-family:var(--mono);color:var(--ink3);}
+.recap-table .rc-q{max-width:430px;color:var(--ink2);font-family:"Noto Sans JP",var(--ui-font);}
+.recap-table .rc-truth{font-weight:700;}
+.rc-ok{color:var(--ok);font-weight:800;}
+.rc-ng{color:var(--ng);font-weight:800;}
+.ro-actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;}
+.ro-btn{font:600 15px var(--ui-font);padding:12px 26px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--ink);transition:.18s;}
+.ro-btn:hover{border-color:var(--ink3);}
+.ro-btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink);}
+.ro-btn.primary:hover{filter:brightness(1.15);}
+.ro-btn.share{border-color:color-mix(in oklab,var(--ai) 45%,var(--line));color:var(--ai);}
 `;

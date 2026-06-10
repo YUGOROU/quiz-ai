@@ -12,6 +12,7 @@
       "boot.start": "対戦スタート",
       "boot.generating": "実モデルで対戦を生成中…（gemma が思考しています）",
       "boot.almost": "まもなく完了…",
+      "boot.retry": "もう一度試す",
       "boot.replay": "▶ リプレイ",
       "boot.newMatch": "✦ 新しい対戦",
       "boot.liveLabel": "Quiz Buzzer AI · ライブ",
@@ -42,6 +43,26 @@
       // rebound（解答権の移動・両者誤答）
       "rebound.aiMissed": "AI が誤答", "rebound.yourChance": "あなたに解答権！",
       "rebound.aiTurn": "AI の解答権 →", "rebound.correctIs": "正解は",
+      // 解答制限時間
+      "timeLeft": "残り",
+      // AI確信度メーター・押下予定
+      "confLabel": "AI確信度", "aiPlanned": "AI予定 ‹ ",
+      // スコア（ポイント表示）
+      "pts": "pt", "correctN": "正解",
+      // roundover（振り返り・導線）
+      "recap": "振り返り", "watchReplay": "観賞リプレイ",
+      "colQ": "問題", "colTruth": "正解", "colAI": "AI", "colYou": "あなた",
+      "share": "結果をXでシェア",
+      "share.text": "日本語早押しクイズAI「Quiz Buzzer AI」と対戦！結果: 自分 {h} − {a} AI（{hp}pt vs {ap}pt）",
+      // エラー（人間語）
+      "err.quota": "GPUの利用枠を使い切ったようです。Hugging Face にログインすると枠が増えます。少し時間を置いて、もう一度お試しください。",
+      "err.server": "対戦の生成に失敗しました。GPU が混み合っている可能性があります。もう一度お試しください。",
+      "err.net": "サーバーに接続できませんでした。通信環境を確認して再試行してください。",
+      // 生成待ちのティップス
+      "tip.1": "ルール: 問題の読み上げ中、AIより早く BUZZ（Space／タップ）すれば解答権はあなたのもの。",
+      "tip.2": "スコア: 正解 +1.0〜1.5（早押しほど高得点）／誤答 −1.5。誤答すると相手に解答権が移ります。",
+      "tip.3": "AIの中身: buzz判定は自作1.2B回帰ヘッド、解答は gemma-4-26B-A4B（日本語クイズSFT済）が毎問リアルタイム生成。",
+      "tip.4": "ヒント: 左カラムの「AI確信度」メーターがθに迫ったらAIが押す合図。先に押すなら今！",
     },
     en: {
       "boot.title": "Quiz Buzzer AI",
@@ -51,6 +72,7 @@
       "boot.start": "Start match",
       "boot.generating": "Generating the match with real models… (gemma is thinking)",
       "boot.almost": "Finishing up…",
+      "boot.retry": "Try again",
       "boot.replay": "▶ Replay",
       "boot.newMatch": "✦ New match",
       "boot.liveLabel": "Quiz Buzzer AI · Live",
@@ -75,6 +97,20 @@
       "replay": "Replay",
       "rebound.aiMissed": "AI missed", "rebound.yourChance": "your chance!",
       "rebound.aiTurn": "AI’s rebound →", "rebound.correctIs": "Correct answer",
+      "timeLeft": "Left",
+      "confLabel": "AI confidence", "aiPlanned": "AI planned ‹ ",
+      "pts": "pt", "correctN": "correct",
+      "recap": "Recap", "watchReplay": "Watch replay",
+      "colQ": "Question", "colTruth": "Truth", "colAI": "AI", "colYou": "You",
+      "share": "Share on X",
+      "share.text": "I challenged Quiz Buzzer AI (Japanese buzz-quiz AI)! Result: me {h} − {a} AI ({hp}pt vs {ap}pt)",
+      "err.quota": "Looks like the free GPU quota ran out. Signing in to Hugging Face raises your quota — please wait a bit and try again.",
+      "err.server": "Failed to generate the match — the GPU may be busy. Please try again.",
+      "err.net": "Could not reach the server. Check your connection and retry.",
+      "tip.1": "Rule: while the question is being read, buzz (Space / tap) before the AI to claim the answer.",
+      "tip.2": "Score: correct +1.0–1.5 (earlier buzz = more points) / wrong −1.5. A miss hands the rebound to your opponent.",
+      "tip.3": "Under the hood: buzz timing = our own 1.2B regression head; answers = gemma-4-26B-A4B (Japanese quiz SFT), generated live per question.",
+      "tip.4": "Tip: when the AI-confidence meter on the left nears θ, the AI is about to buzz. Beat it!",
     },
   };
 
